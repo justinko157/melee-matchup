@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s \"https://www.googleapis.com/customsearch/v1?q=competitive+melee+data+sources+API+tournament+results+2024+2025&key=dummy\")",
+      "WebSearch",
+      "WebFetch(domain:developer.start.gg)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.ssbwiki.com)",
+      "WebFetch(domain:nathaniel-speiser.github.io)",
+      "WebFetch(domain:liquipedia.net)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:smashgg-schema.netlify.app)",
+      "WebFetch(domain:planetbanatt.net)",
+      "WebFetch(domain:quantimschmitzcom.wordpress.com)",
+      "Bash(cd:*)"
+    ]
+  }
+}
