@@ -229,7 +229,7 @@ class MeleeCollector:
 
             set_nodes = self.client.paginate(
                 EVENT_SETS,
-                {"eventId": e_id, "perPage": 40},
+                {"eventId": e_id, "perPage": 15},
                 data_path=["event", "sets"],
             )
 

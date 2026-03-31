@@ -77,6 +77,8 @@ class StartGGClient:
                     time.sleep(wait)
                     continue
 
+                if resp.status_code >= 400:
+                    logger.error(f"HTTP {resp.status_code}: {resp.text}")
                 resp.raise_for_status()
                 data = resp.json()
 
@@ -101,6 +103,8 @@ class StartGGClient:
     def paginate(self, query: str, variables: dict, data_path: list[str]) -> list[dict]:
         """Auto-paginate a query that returns nodes with pageInfo.
 
+        Automatically reduces page size on complexity errors (1000-object limit).
+
         Args:
             query: GraphQL query string (must accept $page and $perPage variables)
             variables: Base variables (page/perPage will be managed automatically)
@@ -116,7 +120,14 @@ class StartGGClient:
 
         while True:
             variables = {**variables, "page": page, "perPage": per_page}
-            result = self.query(query, variables)
+            try:
+                result = self.query(query, variables)
+            except RuntimeError as e:
+                if "complexity" in str(e).lower() and per_page > 5:
+                    per_page = max(5, per_page // 2)
+                    logger.warning(f"Query too complex, reducing page size to {per_page}")
+                    continue
+                raise
 
             # Navigate to the paginated field
             obj = result
