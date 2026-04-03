@@ -123,10 +123,14 @@ class StartGGClient:
             try:
                 result = self.query(query, variables)
             except RuntimeError as e:
-                if "complexity" in str(e).lower() and per_page > 5:
+                err = str(e).lower()
+                if "complexity" in err and per_page > 5:
                     per_page = max(5, per_page // 2)
                     logger.warning(f"Query too complex, reducing page size to {per_page}")
                     continue
+                if "10,000" in str(e) or "10000" in str(e):
+                    logger.warning("Hit 10,000 entry pagination limit")
+                    return all_nodes
                 raise
 
             # Navigate to the paginated field

@@ -15,7 +15,6 @@ from pathlib import Path
 import mlflow
 import numpy as np
 import pandas as pd
-from sklearn.calibration import calibration_curve
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
@@ -159,7 +158,6 @@ def train_logistic(
 
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
 
     model = LogisticRegression(max_iter=1000)
     model.fit(X_train_scaled, y_train)
@@ -259,6 +257,65 @@ def run_all(
         results.append(result)
 
     return results
+
+
+def walk_forward_cv(
+    data_path: Path | str = FEATURES_PATH,
+    min_sets: int = 5,
+    n_folds: int = 4,
+) -> pd.DataFrame:
+    """Walk-forward time-series cross-validation for XGBoost.
+
+    Splits data into n_folds+1 temporal chunks. For each fold k (1..n_folds),
+    trains on chunks 0..k-1 and tests on chunk k.
+
+    Returns a DataFrame with per-fold and mean metrics.
+    """
+    df = load_data(data_path, min_sets=min_sets)
+    timestamps = df["completed_at"].quantile(
+        [i / (n_folds + 1) for i in range(1, n_folds + 1)]
+    ).tolist()
+    timestamps.append(df["completed_at"].max() + 1)
+
+    fold_results = []
+
+    for fold_idx, split_ts in enumerate(timestamps):
+        train = df[df["completed_at"] < split_ts]
+        # Test on the next chunk only
+        if fold_idx < len(timestamps) - 1:
+            next_ts = timestamps[fold_idx + 1]
+            test = df[(df["completed_at"] >= split_ts) & (df["completed_at"] < next_ts)]
+        else:
+            test = df[df["completed_at"] >= split_ts]
+
+        if len(test) == 0:
+            continue
+
+        result = train_xgboost(train, test)
+        fold_results.append({
+            "Fold": fold_idx + 1,
+            "Train Size": len(train),
+            "Test Size": len(test),
+            "Accuracy": result.accuracy,
+            "Log Loss": result.log_loss_val,
+            "Brier Score": result.brier_score,
+            "ROC AUC": result.roc_auc,
+        })
+        logger.info(
+            f"Fold {fold_idx + 1}: train={len(train):,}, "
+            f"test={len(test):,}, AUC={result.roc_auc:.4f}"
+        )
+
+    results_df = pd.DataFrame(fold_results)
+
+    # Add mean row
+    mean_row = results_df[["Accuracy", "Log Loss", "Brier Score", "ROC AUC"]].mean()
+    mean_row["Fold"] = "Mean"
+    mean_row["Train Size"] = ""
+    mean_row["Test Size"] = ""
+    results_df = pd.concat([results_df, pd.DataFrame([mean_row])], ignore_index=True)
+
+    return results_df
 
 
 def results_table(results: list[ModelResult]) -> pd.DataFrame:

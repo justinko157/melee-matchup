@@ -147,25 +147,9 @@ class MeleeCollector:
         self.client = client
         self.db = db
 
-    def discover_tournaments(
-        self,
-        after_date: int,
-        before_date: int,
-        min_attendees: int = 50,
-    ) -> list[dict]:
-        """Find Melee tournaments in a date range.
-
-        Args:
-            after_date: Unix timestamp for the start of the range.
-            before_date: Unix timestamp for the end of the range.
-            min_attendees: Minimum number of attendees to include.
-
-        Returns:
-            List of tournament dicts from the API, filtered to relevant ones.
-        """
-        logger.info(f"Discovering tournaments from {after_date} to {before_date}")
-
-        tournaments = self.client.paginate(
+    def _discover_chunk(self, after_date: int, before_date: int) -> list[dict]:
+        """Fetch one chunk of tournaments from the API."""
+        return self.client.paginate(
             TOURNAMENTS_BY_GAME,
             {
                 "videogameId": MELEE_VIDEOGAME_ID,
@@ -176,9 +160,48 @@ class MeleeCollector:
             data_path=["tournaments"],
         )
 
+    def discover_tournaments(
+        self,
+        after_date: int,
+        before_date: int,
+        min_attendees: int = 50,
+    ) -> list[dict]:
+        """Find Melee tournaments in a date range.
+
+        Automatically splits into 3-month windows to stay under the
+        start.gg 10,000-entry pagination limit.
+
+        Args:
+            after_date: Unix timestamp for the start of the range.
+            before_date: Unix timestamp for the end of the range.
+            min_attendees: Minimum number of attendees to include.
+
+        Returns:
+            List of tournament dicts from the API, filtered to relevant ones.
+        """
+        # Split into 3-month (90-day) windows to avoid the 10k limit
+        chunk_size = 90 * 24 * 60 * 60  # 90 days in seconds
+        all_tournaments = []
+        seen_ids = set()
+
+        window_start = after_date
+        while window_start < before_date:
+            window_end = min(window_start + chunk_size, before_date)
+            logger.info(f"Discovering tournaments: window {window_start} to {window_end}")
+
+            chunk = self._discover_chunk(window_start, window_end)
+
+            for t in chunk:
+                if t["id"] not in seen_ids:
+                    seen_ids.add(t["id"])
+                    all_tournaments.append(t)
+
+            logger.info(f"  Found {len(chunk)} in this window ({len(all_tournaments)} total)")
+            window_start = window_end
+
         # Filter to offline tournaments with enough attendees
         filtered = []
-        for t in tournaments:
+        for t in all_tournaments:
             attendees = t.get("numAttendees") or 0
             is_online = t.get("isOnline", False)
 
@@ -187,7 +210,7 @@ class MeleeCollector:
 
         logger.info(
             f"Found {len(filtered)} tournaments with {min_attendees}+ attendees "
-            f"(from {len(tournaments)} total)"
+            f"(from {len(all_tournaments)} total)"
         )
         return filtered
 
