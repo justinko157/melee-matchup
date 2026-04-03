@@ -15,6 +15,9 @@ data/raw/*.db
 data/raw/*.csv
 data/processed/
 
+# Claude Code
+.claude/
+
 # IDE
 .vscode/
 .idea/
