@@ -7,13 +7,22 @@ import math
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
+import shap
 import streamlit as st
 import xgboost as xgb
 
 APP_DATA = Path(__file__).parent / "data" / "app"
 CORE_FEATURES = [
-    "elo_diff", "p1_expected", "p1_sets_played", "p2_sets_played",
-    "recent_wr_diff", "p1_h2h_wr", "h2h_total", "seed_diff", "num_attendees",
+    "elo_diff",
+    "p1_expected",
+    "p1_sets_played",
+    "p2_sets_played",
+    "recent_wr_diff",
+    "p1_h2h_wr",
+    "h2h_total",
+    "seed_diff",
+    "num_attendees",
 ]
 
 
@@ -33,6 +42,26 @@ def load_players():
 @st.cache_data
 def load_h2h():
     return pd.read_parquet(APP_DATA / "h2h.parquet")
+
+
+@st.cache_resource
+def load_shap_explainer():
+    model = load_model()
+    explainer = shap.TreeExplainer(model)
+    return explainer
+
+
+FEATURE_LABELS = {
+    "elo_diff": "Elo Rating Gap",
+    "p1_expected": "Expected Win Rate (Elo)",
+    "p1_sets_played": "P1 Experience",
+    "p2_sets_played": "P2 Experience",
+    "recent_wr_diff": "Recent Form Gap",
+    "p1_h2h_wr": "Head-to-Head Record",
+    "h2h_total": "H2H Sets Played",
+    "seed_diff": "Seed Differential",
+    "num_attendees": "Tournament Size",
+}
 
 
 def get_h2h(h2h_df, pid1, pid2):
@@ -60,6 +89,7 @@ st.set_page_config(page_title="MeleeMatchup", page_icon="🎮", layout="wide")
 model = load_model()
 players = load_players()
 h2h_df = load_h2h()
+explainer = load_shap_explainer()
 
 # Sidebar navigation
 page = st.sidebar.radio("Navigate", ["Match Predictor", "Elo Leaderboard"], index=0)
@@ -95,17 +125,21 @@ if page == "Match Predictor":
         p1_h2h_wr = p1_h2h_w / h2h_total if h2h_total > 0 else 0.5
 
         # Build feature vector
-        features = pd.DataFrame([{
-            "elo_diff": p1["elo"] - p2["elo"],
-            "p1_expected": elo_expected(p1["elo"], p2["elo"]),
-            "p1_sets_played": p1["sets_played"],
-            "p2_sets_played": p2["sets_played"],
-            "recent_wr_diff": p1["recent_wr"] - p2["recent_wr"],
-            "p1_h2h_wr": p1_h2h_wr,
-            "h2h_total": h2h_total,
-            "seed_diff": 0,  # No seed info for ad-hoc prediction
-            "num_attendees": attendees,
-        }])
+        features = pd.DataFrame(
+            [
+                {
+                    "elo_diff": p1["elo"] - p2["elo"],
+                    "p1_expected": elo_expected(p1["elo"], p2["elo"]),
+                    "p1_sets_played": p1["sets_played"],
+                    "p2_sets_played": p2["sets_played"],
+                    "recent_wr_diff": p1["recent_wr"] - p2["recent_wr"],
+                    "p1_h2h_wr": p1_h2h_wr,
+                    "h2h_total": h2h_total,
+                    "seed_diff": 0,  # No seed info for ad-hoc prediction
+                    "num_attendees": attendees,
+                }
+            ]
+        )
 
         prob = model.predict_proba(features[CORE_FEATURES])[0]
         p1_prob = prob[1]
@@ -126,7 +160,8 @@ if page == "Match Predictor":
         with col_l:
             st.metric(p1_name, f"{p1_prob:.1%}", help="Win probability")
         with col_m:
-            st.markdown("<h2 style='text-align:center; padding-top:20px;'>vs</h2>", unsafe_allow_html=True)
+            vs_html = "<h2 style='text-align:center; padding-top:20px;'>vs</h2>"
+            st.markdown(vs_html, unsafe_allow_html=True)
         with col_r:
             st.metric(p2_name, f"{p2_prob:.1%}", help="Win probability")
 
@@ -164,9 +199,55 @@ if page == "Match Predictor":
         st.subheader("Career Records")
         rec1, rec2 = st.columns(2)
         with rec1:
-            st.write(f"**{p1_name}**: {int(p1['wins'])}W - {int(p1['losses'])}L ({p1['win_rate']:.1%}) — {int(p1['total_sets'])} sets")
+            p1_rec = f"{int(p1['wins'])}W - {int(p1['losses'])}L ({p1['win_rate']:.1%})"
+            st.write(f"**{p1_name}**: {p1_rec} — {int(p1['total_sets'])} sets")
         with rec2:
-            st.write(f"**{p2_name}**: {int(p2['wins'])}W - {int(p2['losses'])}L ({p2['win_rate']:.1%}) — {int(p2['total_sets'])} sets")
+            p2_rec = f"{int(p2['wins'])}W - {int(p2['losses'])}L ({p2['win_rate']:.1%})"
+            st.write(f"**{p2_name}**: {p2_rec} — {int(p2['total_sets'])} sets")
+
+        # SHAP explanation
+        st.divider()
+        st.subheader("Why This Prediction?")
+        st.caption(
+            "SHAP values show how each feature pushes the prediction "
+            "toward or away from a Player 1 win."
+        )
+
+        shap_values = explainer.shap_values(features[CORE_FEATURES])
+        sv = shap_values[0]  # Single prediction
+
+        # Build a DataFrame for the horizontal bar chart
+        shap_df = pd.DataFrame(
+            {
+                "Feature": [FEATURE_LABELS.get(f, f) for f in CORE_FEATURES],
+                "SHAP Value": sv,
+            }
+        )
+        shap_df["abs"] = shap_df["SHAP Value"].abs()
+        shap_df = shap_df.sort_values("abs", ascending=True).drop(columns="abs")
+        shap_df["Color"] = shap_df["SHAP Value"].apply(
+            lambda x: f"Favors {p1_name}" if x > 0 else f"Favors {p2_name}"
+        )
+
+        fig = px.bar(
+            shap_df,
+            x="SHAP Value",
+            y="Feature",
+            color="Color",
+            orientation="h",
+            color_discrete_map={
+                f"Favors {p1_name}": "#636EFA",
+                f"Favors {p2_name}": "#EF553B",
+            },
+        )
+        fig.update_layout(
+            height=350,
+            margin=dict(l=0, r=0, t=10, b=0),
+            legend_title_text="",
+            xaxis_title="Impact on Prediction (log-odds)",
+            yaxis_title="",
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 
 elif page == "Elo Leaderboard":
@@ -184,7 +265,8 @@ elif page == "Elo Leaderboard":
     filtered = filtered.reset_index(drop=True)
     filtered.index = filtered.index + 1  # 1-indexed rank
 
-    display = filtered[["gamer_tag", "elo", "sets_played", "recent_wr", "wins", "losses", "win_rate"]].copy()
+    display_cols = ["gamer_tag", "elo", "sets_played", "recent_wr", "wins", "losses", "win_rate"]
+    display = filtered[display_cols].copy()
     display.columns = ["Player", "Elo", "Sets Played", "Recent Form", "Wins", "Losses", "Win Rate"]
     display["Elo"] = display["Elo"].apply(lambda x: f"{x:.0f}")
     display["Recent Form"] = display["Recent Form"].apply(lambda x: f"{x:.0%}")

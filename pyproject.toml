@@ -14,6 +14,8 @@ dependencies = [
 dev = [
     "ruff>=0.4",
     "pytest>=8.0",
+    "pandera>=0.18",
+    "pre-commit>=3.6",
 ]
 ml = [
     "scikit-learn>=1.4",
@@ -21,6 +23,8 @@ ml = [
     "matplotlib>=3.8",
     "seaborn>=0.13",
     "plotly>=5.18",
+    "shap>=0.45",
+    "optuna>=3.5",
 ]
 app = [
     "streamlit>=1.30",

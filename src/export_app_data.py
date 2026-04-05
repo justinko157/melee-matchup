@@ -14,7 +14,13 @@ from pathlib import Path
 import pandas as pd
 
 from .database import DEFAULT_DB_PATH
-from .model import load_data, temporal_split, train_xgboost
+from .model import (
+    CORE_FEATURES,
+    export_shap_metadata,
+    load_data,
+    temporal_split,
+    train_xgboost,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,7 +49,7 @@ RENAME_P2 = {
 
 
 def export_model():
-    """Train XGBoost and export it."""
+    """Train XGBoost and export model + SHAP metadata."""
     df = load_data()
     train, test = temporal_split(df)
     result = train_xgboost(train, test)
@@ -52,6 +58,11 @@ def export_model():
     model_path = APP_DATA_DIR / "model.json"
     result.model.save_model(str(model_path))
     logger.info(f"Exported model to {model_path}")
+
+    # Export SHAP metadata for per-prediction explanations
+    X_test = test[CORE_FEATURES]
+    shap_path = APP_DATA_DIR / "shap_metadata.json"
+    export_shap_metadata(result.model, X_test, shap_path)
 
 
 def export_player_snapshots():
@@ -65,43 +76,39 @@ def export_player_snapshots():
     p2 = features[src_cols_p2].rename(columns=RENAME_P2)
 
     all_player_rows = pd.concat([p1, p2])
-    latest = (
-        all_player_rows.sort_values("completed_at")
-        .groupby("player_id")
-        .last()
-        .reset_index()
-    )
+    latest = all_player_rows.sort_values("completed_at").groupby("player_id").last().reset_index()
 
     # Add gamer tags
     conn = sqlite3.connect(DEFAULT_DB_PATH)
-    names = pd.read_sql(
-        "SELECT id as player_id, gamer_tag FROM players", conn
-    )
+    names = pd.read_sql("SELECT id as player_id, gamer_tag FROM players", conn)
     conn.close()
     latest = latest.merge(names, on="player_id", how="left")
 
     # Compute overall win rate from the DB
     conn = sqlite3.connect(DEFAULT_DB_PATH)
-    wins = pd.read_sql("""
+    wins = pd.read_sql(
+        """
         SELECT winner_player_id as player_id, COUNT(*) as wins
         FROM sets WHERE winner_player_id IS NOT NULL
         GROUP BY winner_player_id
-    """, conn)
+    """,
+        conn,
+    )
     total_as_p1 = pd.read_sql(
-        "SELECT player1_id as player_id, COUNT(*) as c "
-        "FROM sets GROUP BY player1_id",
+        "SELECT player1_id as player_id, COUNT(*) as c " "FROM sets GROUP BY player1_id",
         conn,
     )
     total_as_p2 = pd.read_sql(
-        "SELECT player2_id as player_id, COUNT(*) as c "
-        "FROM sets GROUP BY player2_id",
+        "SELECT player2_id as player_id, COUNT(*) as c " "FROM sets GROUP BY player2_id",
         conn,
     )
     conn.close()
 
-    totals = total_as_p1.set_index("player_id")["c"].add(
-        total_as_p2.set_index("player_id")["c"], fill_value=0
-    ).reset_index()
+    totals = (
+        total_as_p1.set_index("player_id")["c"]
+        .add(total_as_p2.set_index("player_id")["c"], fill_value=0)
+        .reset_index()
+    )
     totals.columns = ["player_id", "total_sets"]
     wins.columns = ["player_id", "wins"]
 
@@ -120,10 +127,13 @@ def export_player_snapshots():
 def export_h2h():
     """Export head-to-head records for all player pairs with 2+ sets."""
     conn = sqlite3.connect(DEFAULT_DB_PATH)
-    sets_df = pd.read_sql("""
+    sets_df = pd.read_sql(
+        """
         SELECT player1_id, player2_id, winner_player_id
         FROM sets WHERE winner_player_id IS NOT NULL
-    """, conn)
+    """,
+        conn,
+    )
     conn.close()
 
     h2h: dict[tuple[int, int], list[int]] = defaultdict(lambda: [0, 0])

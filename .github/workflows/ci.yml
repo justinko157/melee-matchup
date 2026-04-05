@@ -23,7 +23,7 @@ jobs:
           pip install -e ".[dev,ml]"
 
       - name: Lint with ruff
-        run: ruff check src/ tests/
+        run: ruff check src/ tests/ app.py
 
       - name: Run tests
         run: pytest tests/ -v

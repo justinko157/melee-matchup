@@ -8,6 +8,7 @@ Models:
 Uses a temporal train/test split (no random shuffle) to avoid leakage.
 """
 
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 import mlflow
 import numpy as np
 import pandas as pd
+import shap
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
@@ -134,9 +136,7 @@ def evaluate(
     )
 
 
-def train_baseline(
-    train: pd.DataFrame, test: pd.DataFrame
-) -> ModelResult:
+def train_baseline(train: pd.DataFrame, test: pd.DataFrame) -> ModelResult:
     """Baseline: logistic regression on seed differential only."""
     features = SEED_FEATURES
     X_train, y_train = train[features], train[TARGET]
@@ -148,9 +148,7 @@ def train_baseline(
     return evaluate("Baseline (Seed Only)", model, X_test, y_test, features)
 
 
-def train_logistic(
-    train: pd.DataFrame, test: pd.DataFrame
-) -> ModelResult:
+def train_logistic(train: pd.DataFrame, test: pd.DataFrame) -> ModelResult:
     """Full logistic regression on all core features."""
     features = CORE_FEATURES
     X_train, y_train = train[features], train[TARGET]
@@ -176,9 +174,7 @@ def train_logistic(
     return evaluate("Logistic Regression (All Features)", wrapped, X_test, y_test, features)
 
 
-def train_xgboost(
-    train: pd.DataFrame, test: pd.DataFrame
-) -> ModelResult:
+def train_xgboost(train: pd.DataFrame, test: pd.DataFrame) -> ModelResult:
     """XGBoost gradient boosting on all core features."""
     features = CORE_FEATURES
     X_train, y_train = train[features], train[TARGET]
@@ -196,12 +192,52 @@ def train_xgboost(
         random_state=42,
     )
     model.fit(
-        X_train, y_train,
+        X_train,
+        y_train,
         eval_set=[(X_test, y_test)],
         verbose=False,
     )
 
     return evaluate("XGBoost", model, X_test, y_test, features)
+
+
+def compute_shap(model, X: pd.DataFrame) -> shap.Explanation:
+    """Compute SHAP values for an XGBoost model.
+
+    Args:
+        model: Trained XGBClassifier.
+        X: Feature DataFrame to explain.
+
+    Returns:
+        shap.Explanation with .values, .base_values, and .data.
+    """
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer(X)
+    return shap_values
+
+
+def export_shap_metadata(model, X_sample: pd.DataFrame, out_path: Path):
+    """Export SHAP base value and mean absolute SHAP per feature.
+
+    Saves a JSON file the Streamlit app uses for per-prediction explanations.
+    """
+    explainer = shap.TreeExplainer(model)
+    base_value = float(explainer.expected_value)
+    shap_values = explainer(X_sample)
+    mean_abs = np.abs(shap_values.values).mean(axis=0).tolist()
+
+    metadata = {
+        "base_value": base_value,
+        "feature_names": list(X_sample.columns),
+        "mean_abs_shap": dict(zip(X_sample.columns, mean_abs)),
+    }
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    logger.info(f"Exported SHAP metadata to {out_path}")
+    return metadata
 
 
 def run_all(
@@ -237,20 +273,24 @@ def run_all(
             mlflow.set_experiment("melee-matchup")
             with mlflow.start_run(run_name=run_name):
                 result = trainer_fn(train, test)
-                mlflow.log_params({
-                    "model": result.name,
-                    "min_sets": min_sets,
-                    "split_ts": split_ts,
-                    "train_size": len(train),
-                    "test_size": len(test),
-                    "features": result.feature_names,
-                })
-                mlflow.log_metrics({
-                    "accuracy": result.accuracy,
-                    "log_loss": result.log_loss_val,
-                    "brier_score": result.brier_score,
-                    "roc_auc": result.roc_auc,
-                })
+                mlflow.log_params(
+                    {
+                        "model": result.name,
+                        "min_sets": min_sets,
+                        "split_ts": split_ts,
+                        "train_size": len(train),
+                        "test_size": len(test),
+                        "features": result.feature_names,
+                    }
+                )
+                mlflow.log_metrics(
+                    {
+                        "accuracy": result.accuracy,
+                        "log_loss": result.log_loss_val,
+                        "brier_score": result.brier_score,
+                        "roc_auc": result.roc_auc,
+                    }
+                )
         else:
             result = trainer_fn(train, test)
 
@@ -272,9 +312,9 @@ def walk_forward_cv(
     Returns a DataFrame with per-fold and mean metrics.
     """
     df = load_data(data_path, min_sets=min_sets)
-    timestamps = df["completed_at"].quantile(
-        [i / (n_folds + 1) for i in range(1, n_folds + 1)]
-    ).tolist()
+    timestamps = (
+        df["completed_at"].quantile([i / (n_folds + 1) for i in range(1, n_folds + 1)]).tolist()
+    )
     timestamps.append(df["completed_at"].max() + 1)
 
     fold_results = []
@@ -292,15 +332,17 @@ def walk_forward_cv(
             continue
 
         result = train_xgboost(train, test)
-        fold_results.append({
-            "Fold": fold_idx + 1,
-            "Train Size": len(train),
-            "Test Size": len(test),
-            "Accuracy": result.accuracy,
-            "Log Loss": result.log_loss_val,
-            "Brier Score": result.brier_score,
-            "ROC AUC": result.roc_auc,
-        })
+        fold_results.append(
+            {
+                "Fold": fold_idx + 1,
+                "Train Size": len(train),
+                "Test Size": len(test),
+                "Accuracy": result.accuracy,
+                "Log Loss": result.log_loss_val,
+                "Brier Score": result.brier_score,
+                "ROC AUC": result.roc_auc,
+            }
+        )
         logger.info(
             f"Fold {fold_idx + 1}: train={len(train):,}, "
             f"test={len(test):,}, AUC={result.roc_auc:.4f}"
@@ -322,13 +364,15 @@ def results_table(results: list[ModelResult]) -> pd.DataFrame:
     """Format results as a comparison table."""
     rows = []
     for r in results:
-        rows.append({
-            "Model": r.name,
-            "Accuracy": f"{r.accuracy:.4f}",
-            "Log Loss": f"{r.log_loss_val:.4f}",
-            "Brier Score": f"{r.brier_score:.4f}",
-            "ROC AUC": f"{r.roc_auc:.4f}",
-        })
+        rows.append(
+            {
+                "Model": r.name,
+                "Accuracy": f"{r.accuracy:.4f}",
+                "Log Loss": f"{r.log_loss_val:.4f}",
+                "Brier Score": f"{r.brier_score:.4f}",
+                "ROC AUC": f"{r.roc_auc:.4f}",
+            }
+        )
     return pd.DataFrame(rows)
 
 
