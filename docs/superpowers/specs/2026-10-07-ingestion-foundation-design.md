@@ -1,7 +1,7 @@
 # Ingestion Foundation — Design
 
 **Date:** 2026-10-07
-**Status:** Approved in brainstorming, pending written-spec review
+**Status:** Approved. Revised during planning; see "Changes made during planning" at the end.
 **Sub-project:** 1 of 4 in the data engineering pivot
 
 ## Context and intent
@@ -64,12 +64,11 @@ All services run in Docker Compose, defined under `infra/`.
 
 | Service | Role |
 |---|---|
-| MinIO | S3-compatible object storage for Iceberg data files and Spark checkpoints |
+| Silo | S3-compatible object storage for Iceberg data files. Silo is a maintained fork of MinIO, which no longer publishes images; it also serves the STS endpoint Lakekeeper uses to vend credentials. |
 | Lakekeeper | Iceberg REST catalog, backed by Postgres |
 | Postgres | One instance, two databases: Lakekeeper's catalog and Dagster's run and event storage |
 | Kafka | Single broker in KRaft mode, official `apache/kafka` image |
 | Kafka UI | Web UI for browsing topics and messages |
-| Spark | Standalone cluster: one master, one worker. Jobs are launched with `spark-submit` against the master. |
 | Trino | SQL over the Iceberg tables through the Lakekeeper REST catalog |
 | Dagster | Webserver, daemon and one user code location container |
 
@@ -77,9 +76,10 @@ Spark uses the 4.0.x line with the matching `iceberg-spark-runtime` and the
 Spark-Kafka connector. Exact image tags and versions are pinned in the
 implementation plan.
 
-The stack needs about 8–10 GB of RAM for Docker Desktop. The fallback, if
-memory is tight, is to run Spark in local mode inside the Dagster code
-container. That fallback is not built unless needed.
+Spark runs in local mode (`local[2]`) inside the Dagster code container,
+launched with `spark-submit`. Docker on the development machine has about
+7.3 GiB of memory, and a standalone master and worker would push the stack past
+it. A standalone cluster can return later as an optional Compose profile.
 
 ### Code layout
 
@@ -104,7 +104,7 @@ environment that `uv sync` created on first setup.
 
 ```
 start.gg API --(Dagster asset, weekly partition)--> Kafka topics (raw JSON)
-Kafka --(Spark job, availableNow trigger, launched by Dagster)--> Iceberg bronze on MinIO
+Kafka --(Spark job, availableNow trigger, launched by Dagster)--> Iceberg bronze on Silo
 Iceberg <-- Trino (ad-hoc SQL)        Kafka <-- Kafka UI (inspection)
 ```
 
@@ -134,7 +134,7 @@ Iceberg <-- Trino (ad-hoc SQL)        Kafka <-- Kafka UI (inspection)
 |---|---|---|
 | `startgg.tournaments.raw` | tournament ID | tournament, including its events list |
 | `startgg.sets.raw` | set ID | set |
-| `startgg.ingest.dlq` | entity ID | failed tournament or event (Section 3) |
+| `startgg.ingest.dlq` | entity ID | failed event (Section 3) |
 
 - Each topic has 3 partitions. Keying by ID keeps every version of a record in
   one partition, in order.
@@ -149,7 +149,7 @@ Every message value is JSON with these fields:
 
 | Field | Description |
 |---|---|
-| `entity` | `tournament` or `set` on raw topics; `tournament` or `event` on the DLQ |
+| `entity` | `tournament` or `set` on raw topics; `event` on the DLQ |
 | `entity_id` | start.gg ID as a string |
 | `ingested_at` | UTC ISO-8601 timestamp of when the record was fetched |
 | `dagster_run_id` | run that produced the message |
@@ -159,15 +159,17 @@ Every message value is JSON with these fields:
 | `payload` | the unchanged API node for this entity |
 
 DLQ messages use the same envelope with `entity` set to the failed entity's
-type (`tournament` or `event`), `payload` set to `null`, and two extra fields: `error_type` and
+type (`event`), `payload` set to `null`, and two extra fields: `error_type` and
 `error_message`.
 
 ### Bronze landing job
 
 - A Spark Structured Streaming job reads both raw topics with the
   `availableNow` trigger: it processes everything new, commits and stops.
-- The checkpoint lives in MinIO, so each run continues from the last committed
-  offsets.
+- The checkpoint lives on a Docker volume mounted in the Dagster code
+  container, so each run continues from the last committed offsets. (Spark
+  writes checkpoints through Hadoop's S3 connector, whose AWS SDK dependency
+  is about 500 MB; in local mode a volume does the same job.)
 - Tables, in the Iceberg namespace `bronze`:
   - `bronze.startgg_tournaments`
   - `bronze.startgg_sets`
@@ -205,10 +207,12 @@ never writes the same Kafka offset twice, including after a crash mid-run.
 
 ### Dead-letter queue
 
-- When a tournament or event still fails after retries, a DLQ message is
-  published and the run continues with the next one. One broken event does
+- When an event's sets still fail to download after retries, a DLQ message
+  is published and the run continues with the next event. Tournaments are
+  only fetched by the weekly discovery query, so a single tournament cannot
+  fail on its own; a discovery failure fails the run. One broken event does
   not block a whole week.
-- The asset check `startgg_raw_no_dlq_messages` fails for a partition run
+- The asset check `no_dlq_messages` on `startgg_raw` fails for a partition run
   that published any DLQ messages, and reports the count.
 - Retrying means re-running the partition, which is safe because bronze
   tolerates duplicates.
@@ -225,14 +229,14 @@ delivered. Re-running the partition is the fix.
 - Messages whose envelope cannot be parsed go to `bronze.startgg_rejects`
   with the raw key and value bytes, Kafka coordinates and a reason, instead of
   failing the job.
-- The asset check `bronze_startgg_no_rejects` fails when the run wrote any
+- The asset check `no_rejects` on `bronze_startgg` fails when the run wrote any
   reject rows.
 
 ### Secrets
 
 - The start.gg token reaches the Dagster code container from `.env`. It is
   never logged or written into envelopes or query variables.
-- MinIO, Postgres and Kafka credentials are local-only defaults documented in
+- Silo, Postgres and Kafka credentials are local-only defaults documented in
   `.env.example`.
 
 ## Section 4: Testing
@@ -258,7 +262,7 @@ fixtures need no scrubbing. Tests never call the live API.
   Kafka's source schema and returns bronze rows and reject rows. It is tested
   with a local SparkSession and constructed rows, with no Kafka.
 - These tests are marked `spark`, are skipped by default locally, and run
-  inside the Spark container with `make test-spark` and in CI on Ubuntu.
+  inside the pipeline container with `make test-spark` and in CI on Ubuntu.
 
 ### Dagster tests
 
@@ -301,3 +305,16 @@ The existing 20 tests in `tests/` keep passing.
    `bronze.startgg_sets`.
 4. Unit, Dagster, Spark and smoke tests pass locally and in CI.
 5. The README gains a section describing the new stack and how to run it.
+
+## Changes made during planning
+
+- **Silo instead of MinIO.** MinIO stopped publishing container images.
+  Silo is the maintained fork that Lakekeeper's own examples use.
+- **Spark local mode instead of a standalone cluster.** Docker on the
+  development machine has about 7.3 GiB of memory.
+- **Streaming checkpoints on a Docker volume instead of object storage.**
+  Avoids a roughly 500 MB Hadoop AWS dependency. Revisit in sub-project 4.
+- **Only events are dead-lettered.** Tournaments come only from the weekly
+  discovery query; a discovery failure fails the run.
+- **`make` is installed on the development machine** with
+  `winget install ezwinports.make`.
