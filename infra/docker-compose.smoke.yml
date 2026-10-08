@@ -1,0 +1,13 @@
+services:
+  silo:
+    ports: !reset []
+  lakekeeper:
+    ports: !reset []
+  kafka:
+    ports: !reset []
+  kafka-ui:
+    ports: !reset []
+  trino:
+    ports: !reset []
+  dagster-webserver:
+    ports: !reset []
