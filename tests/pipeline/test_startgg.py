@@ -1,0 +1,400 @@
+import logging
+
+import pytest
+import requests
+
+from pipeline.ingest.startgg import (
+    MAX_ATTEMPTS,
+    MIN_PAGE_SIZE,
+    ComplexityError,
+    GraphQLError,
+    InvalidTokenError,
+    PaginationCapError,
+    RateLimiter,
+    RequestRejectedError,
+    RetriesExhaustedError,
+    StartGGClient,
+    StartGGError,
+    operation_name,
+)
+
+TOKEN = "secret-token-value"
+QUERY = "query EventSets($eventId: ID!) { event(id: $eventId) { id } }"
+PAGED_QUERY = "query EventSets($eventId: ID!, $page: Int!, $perPage: Int!) { x }"
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, body=None, text="", headers=None):
+        self.status_code = status_code
+        self._body = body
+        self.text = text
+        self.headers = headers or {}
+
+    def json(self):
+        return self._body
+
+
+class FakeSession:
+    """Returns queued responses (or raises queued exceptions) in order."""
+
+    def __init__(self, *responses):
+        self.headers = {}
+        self._responses = list(responses)
+        self.calls = []
+
+    def post(self, url, json, timeout):
+        self.calls.append(json)
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def ok(data):
+    return FakeResponse(200, {"data": data})
+
+
+def make_client(*responses):
+    session = FakeSession(*responses)
+    sleeps = []
+    client = StartGGClient(
+        TOKEN,
+        session=session,
+        rate_limiter=RateLimiter(max_requests=10_000),
+        sleep=sleeps.append,
+    )
+    return client, session, sleeps
+
+
+def test_operation_name():
+    assert operation_name(QUERY) == "EventSets"
+
+
+def test_empty_token_raises_invalid_token():
+    with pytest.raises(InvalidTokenError, match="STARTGG_API_TOKEN"):
+        StartGGClient("")
+
+
+def test_query_returns_data_and_sets_auth_header():
+    client, session, _ = make_client(ok({"event": {"id": 1}}))
+    assert client.query(QUERY, {"eventId": 1}) == {"event": {"id": 1}}
+    assert session.headers["Authorization"] == f"Bearer {TOKEN}"
+    assert client.api_calls == 1
+
+
+def test_invalid_token_400_fails_fast_without_retry():
+    client, session, _ = make_client(
+        FakeResponse(400, text='{"message":"Invalid authentication token"}')
+    )
+    with pytest.raises(InvalidTokenError):
+        client.query(QUERY, {})
+    assert len(session.calls) == 1
+
+
+def test_401_fails_fast():
+    client, session, _ = make_client(FakeResponse(401, text="Unauthorized"))
+    with pytest.raises(InvalidTokenError):
+        client.query(QUERY, {})
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        FakeResponse(429),
+        FakeResponse(502),
+        requests.exceptions.Timeout(),
+        requests.exceptions.ConnectionError(),
+    ],
+)
+def test_transient_failures_are_retried(first):
+    client, session, sleeps = make_client(first, ok({"event": None}))
+    assert client.query(QUERY, {}) == {"event": None}
+    assert len(session.calls) == 2
+    assert sleeps == [2.0]
+
+
+def test_gives_up_after_max_attempts():
+    client, session, sleeps = make_client(*[FakeResponse(503)] * MAX_ATTEMPTS)
+    with pytest.raises(RetriesExhaustedError, match="EventSets"):
+        client.query(QUERY, {})
+    assert len(session.calls) == MAX_ATTEMPTS
+    assert sleeps == [2.0, 4.0, 8.0]
+
+
+def test_other_4xx_is_not_retried():
+    client, session, _ = make_client(FakeResponse(404, text="not found"))
+    with pytest.raises(RequestRejectedError, match="404"):
+        client.query(QUERY, {})
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("message", "error_class"),
+    [
+        ("Your query complexity is too high", ComplexityError),
+        ("Cannot query more than 10,000th entry", PaginationCapError),
+        ("Something else broke", GraphQLError),
+    ],
+)
+def test_graphql_errors_are_classified(message, error_class):
+    client, _, _ = make_client(FakeResponse(200, {"errors": [{"message": message}]}))
+    with pytest.raises(error_class):
+        client.query(QUERY, {})
+
+
+def test_error_messages_never_contain_the_token():
+    client, _, _ = make_client(FakeResponse(401, text="Unauthorized"))
+    with pytest.raises(InvalidTokenError) as invalid:
+        client.query(QUERY, {})
+    client, _, _ = make_client(*[FakeResponse(500)] * MAX_ATTEMPTS)
+    with pytest.raises(RetriesExhaustedError) as exhausted:
+        client.query(QUERY, {})
+    assert TOKEN not in str(invalid.value)
+    assert TOKEN not in str(exhausted.value)
+
+
+def test_rate_limiter_sleeps_until_window_frees():
+    now = [0.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    limiter = RateLimiter(max_requests=2, window_seconds=10.0, clock=lambda: now[0], sleep=sleep)
+    limiter.acquire()
+    limiter.acquire()
+    limiter.acquire()
+    assert sleeps == [10.0]
+
+
+def page(nodes, page_num, total_pages):
+    return ok(
+        {
+            "event": {
+                "sets": {"nodes": nodes, "pageInfo": {"totalPages": total_pages, "page": page_num}}
+            }
+        }
+    )
+
+
+def test_paginate_concatenates_pages():
+    client, session, _ = make_client(page([{"id": 1}], 1, 2), page([{"id": 2}], 2, 2))
+    nodes = client.paginate(PAGED_QUERY, {"eventId": 5, "perPage": 15}, ["event", "sets"])
+    assert nodes == [{"id": 1}, {"id": 2}]
+    assert [c["variables"]["page"] for c in session.calls] == [1, 2]
+
+
+def test_paginate_halves_page_size_and_restarts_on_complexity():
+    complexity = FakeResponse(200, {"errors": [{"message": "query complexity is too high"}]})
+    client, session, _ = make_client(page([{"id": 1}], 1, 2), complexity, page([{"id": 1}], 1, 1))
+    nodes = client.paginate(PAGED_QUERY, {"eventId": 5, "perPage": 20}, ["event", "sets"])
+    assert nodes == [{"id": 1}]
+    assert [(c["variables"]["page"], c["variables"]["perPage"]) for c in session.calls] == [
+        (1, 20),
+        (2, 20),
+        (1, 10),
+    ]
+
+
+def test_paginate_raises_on_pagination_cap():
+    cap = FakeResponse(200, {"errors": [{"message": "Cannot query more than 10,000th entry"}]})
+    client, _, _ = make_client(page([{"id": 1}], 1, 3), cap)
+    with pytest.raises(PaginationCapError):
+        client.paginate(PAGED_QUERY, {"eventId": 5, "perPage": 15}, ["event", "sets"])
+
+
+def test_paginate_null_nodes_is_empty():
+    client, _, _ = make_client(page(None, 1, 1))
+    assert client.paginate(PAGED_QUERY, {"eventId": 5}, ["event", "sets"]) == []
+
+
+def test_paginate_missing_path_is_empty():
+    client, _, _ = make_client(ok({"event": None}))
+    assert client.paginate(PAGED_QUERY, {"eventId": 5}, ["event", "sets"]) == []
+
+
+def test_token_with_trailing_newline_is_stripped():
+    session = FakeSession(ok({"event": None}))
+    client = StartGGClient(
+        TOKEN + "\n",
+        session=session,
+        rate_limiter=RateLimiter(max_requests=10_000),
+        sleep=lambda _: None,
+    )
+    assert client.query(QUERY, {}) == {"event": None}
+    assert session.headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+@pytest.mark.parametrize("token", ["", "   ", "\n\t "])
+def test_whitespace_only_token_raises_invalid_token(token):
+    with pytest.raises(InvalidTokenError, match="STARTGG_API_TOKEN") as info:
+        StartGGClient(token)
+    assert "STARTGG_API_TOKEN" in str(info.value)
+
+
+def test_request_exception_is_wrapped_without_token():
+    bad_header = requests.exceptions.InvalidHeader(f"Invalid header value Bearer {TOKEN}\n")
+    client, _, _ = make_client(bad_header)
+    with pytest.raises(StartGGError) as info:
+        client.query(QUERY, {})
+    assert not isinstance(info.value, requests.exceptions.RequestException)
+    assert "InvalidHeader" in str(info.value)
+    assert "EventSets" in str(info.value)
+    assert TOKEN not in str(info.value)
+    assert TOKEN not in repr(info.value)
+
+
+def test_request_rejected_body_is_redacted():
+    client, _, _ = make_client(FakeResponse(404, text=f"no such event for token {TOKEN}"))
+    with pytest.raises(RequestRejectedError) as info:
+        client.query(QUERY, {})
+    assert "[REDACTED]" in str(info.value)
+    assert TOKEN not in str(info.value)
+    assert TOKEN not in repr(info.value)
+
+
+def test_graphql_error_payload_is_redacted():
+    errors = [{"message": f"bad input from {TOKEN}"}]
+    client, _, _ = make_client(FakeResponse(200, {"errors": errors}))
+    with pytest.raises(GraphQLError) as info:
+        client.query(QUERY, {})
+    assert "[REDACTED]" in str(info.value)
+    assert TOKEN not in str(info.value)
+    assert TOKEN not in repr(info.value)
+
+
+def test_long_complexity_payload_is_classified_and_truncated():
+    errors = [{"message": "query complexity is too high"}, {"message": "x" * 2000}]
+    client, _, _ = make_client(FakeResponse(200, {"errors": errors}))
+    with pytest.raises(ComplexityError) as info:
+        client.query(QUERY, {})
+    assert len(str(info.value)) <= 500
+
+
+def test_long_non_token_4xx_body_is_truncated():
+    client, _, _ = make_client(FakeResponse(404, text="y" * 2000))
+    with pytest.raises(RequestRejectedError) as info:
+        client.query(QUERY, {})
+    assert len(str(info.value)) <= 600
+
+
+class BadJSONResponse(FakeResponse):
+    def json(self):
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        requests.exceptions.ChunkedEncodingError(),
+        BadJSONResponse(200, text="<html>"),
+        FakeResponse(200, {"message": "no data here"}),
+    ],
+)
+def test_truncated_or_malformed_2xx_is_retried(first):
+    client, session, sleeps = make_client(first, ok({"event": None}))
+    assert client.query(QUERY, {}) == {"event": None}
+    assert len(session.calls) == 2
+    assert sleeps == [2.0]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [BadJSONResponse(200, text=f"<html>{TOKEN}"), FakeResponse(200, {"message": TOKEN})],
+)
+def test_malformed_2xx_exhausts_retries_without_token(response):
+    client, session, _ = make_client(*[response] * MAX_ATTEMPTS)
+    with pytest.raises(RetriesExhaustedError, match="EventSets") as info:
+        client.query(QUERY, {})
+    assert len(session.calls) == MAX_ATTEMPTS
+    assert TOKEN not in str(info.value)
+    assert TOKEN not in repr(info.value)
+
+
+def test_transport_error_text_is_scrubbed_from_logs_and_exception(caplog):
+    error = requests.exceptions.ConnectionError(f"connection reset, header Bearer {TOKEN}")
+    client, _, _ = make_client(*[error] * MAX_ATTEMPTS)
+    with caplog.at_level(logging.WARNING, logger="pipeline.ingest.startgg"):
+        with pytest.raises(RetriesExhaustedError) as info:
+            client.query(QUERY, {})
+    assert caplog.records
+    for record in caplog.records:
+        assert TOKEN not in record.getMessage()
+    assert "[REDACTED]" in str(info.value)
+    assert TOKEN not in str(info.value)
+    assert TOKEN not in repr(info.value)
+
+
+def test_long_transport_error_text_is_truncated():
+    error = requests.exceptions.ConnectionError("z" * 2000)
+    client, _, _ = make_client(*[error] * MAX_ATTEMPTS)
+    with pytest.raises(RetriesExhaustedError) as info:
+        client.query(QUERY, {})
+    assert len(str(info.value)) <= 600
+
+
+def test_non_dict_json_2xx_is_retried():
+    client, session, sleeps = make_client(FakeResponse(200, [1, 2]), ok({"event": None}))
+    assert client.query(QUERY, {}) == {"event": None}
+    assert len(session.calls) == 2
+    assert sleeps == [2.0]
+
+
+def test_non_dict_json_2xx_exhausts_retries():
+    client, session, _ = make_client(*[FakeResponse(200, [TOKEN])] * MAX_ATTEMPTS)
+    with pytest.raises(RetriesExhaustedError, match="EventSets") as info:
+        client.query(QUERY, {})
+    assert len(session.calls) == MAX_ATTEMPTS
+    assert TOKEN not in str(info.value)
+
+
+@pytest.mark.parametrize(
+    ("status", "retry_after", "expected"),
+    [
+        (429, "10", 10.0),  # longer than the 2s backoff
+        (503, "1", 2.0),  # shorter than the backoff, backoff wins
+        (429, "600", 60.0),  # capped
+        (429, "soon", 2.0),  # unparseable, ignored
+        (503, "-5", 2.0),  # negative, backoff wins
+    ],
+)
+def test_retry_after_is_honored(status, retry_after, expected):
+    client, _, sleeps = make_client(
+        FakeResponse(status, headers={"Retry-After": retry_after}), ok({"event": None})
+    )
+    assert client.query(QUERY, {}) == {"event": None}
+    assert sleeps == [expected]
+
+
+def test_retry_after_does_not_carry_over_to_later_attempts():
+    client, _, sleeps = make_client(
+        FakeResponse(429, headers={"Retry-After": "30"}),
+        FakeResponse(502),
+        ok({"event": None}),
+    )
+    assert client.query(QUERY, {}) == {"event": None}
+    assert sleeps == [30.0, 4.0]
+
+
+def test_paginate_reraises_complexity_at_min_page_size():
+    complexity = FakeResponse(200, {"errors": [{"message": "query complexity is too high"}]})
+    client, session, _ = make_client(complexity, complexity)
+    with pytest.raises(ComplexityError):
+        client.paginate(
+            PAGED_QUERY, {"eventId": 5, "perPage": MIN_PAGE_SIZE * 2}, ["event", "sets"]
+        )
+    assert [c["variables"]["perPage"] for c in session.calls] == [MIN_PAGE_SIZE * 2, MIN_PAGE_SIZE]
+
+
+def test_operation_name_of_anonymous_query_falls_back():
+    assert operation_name("{ event(id: 1) { id } }") == "anonymous"
+    assert operation_name("query { event(id: 1) { id } }") == "anonymous"
+
+
+def test_anonymous_query_retries_and_exhausts_without_raising_value_error():
+    client, session, _ = make_client(*[FakeResponse(503)] * MAX_ATTEMPTS)
+    with pytest.raises(RetriesExhaustedError, match="anonymous"):
+        client.query("{ event(id: 1) { id } }", {})
+    assert len(session.calls) == MAX_ATTEMPTS

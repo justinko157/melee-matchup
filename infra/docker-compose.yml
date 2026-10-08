@@ -1,0 +1,305 @@
+name: melee
+
+x-pipeline-image: &pipeline-image
+  image: melee-pipeline:dev
+  build:
+    context: ..
+    dockerfile: infra/pipeline.Dockerfile
+
+x-db-env: &db-env
+  POSTGRES_USER: ${POSTGRES_USER:-melee}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-melee}
+
+x-lakekeeper-env: &lakekeeper-env
+  LAKEKEEPER__PG_ENCRYPTION_KEY: ${LAKEKEEPER_ENCRYPTION_KEY:-local-dev-only-not-a-secret}
+  LAKEKEEPER__PG_DATABASE_URL_READ: postgresql://${POSTGRES_USER:-melee}:${POSTGRES_PASSWORD:-melee}@postgres:5432/lakekeeper
+  LAKEKEEPER__PG_DATABASE_URL_WRITE: postgresql://${POSTGRES_USER:-melee}:${POSTGRES_PASSWORD:-melee}@postgres:5432/lakekeeper
+  RUST_LOG: info
+
+x-dagster: &dagster
+  <<: *pipeline-image
+  environment:
+    <<: *db-env
+    DAGSTER_HOME: /opt/dagster/home
+  volumes:
+    - ./dagster/dagster.yaml:/opt/dagster/home/dagster.yaml:ro
+    - ./dagster/workspace.yaml:/opt/dagster/workspace.yaml:ro
+
+services:
+  postgres:
+    image: postgres:17.11
+    environment:
+      <<: *db-env
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init-databases.sql:/docker-entrypoint-initdb.d/01-init-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  silo:
+    # Maintained MinIO fork; serves S3 plus the STS endpoint Lakekeeper vends credentials from.
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${SILO_ROOT_USER:-melee-admin}
+      MINIO_ROOT_PASSWORD: ${SILO_ROOT_PASSWORD:-melee-admin-password}
+    volumes:
+      - silo-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 10s
+      retries: 30
+
+  create-bucket:
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    depends_on:
+      silo:
+        condition: service_healthy
+    environment:
+      SILO_ROOT_USER: ${SILO_ROOT_USER:-melee-admin}
+      SILO_ROOT_PASSWORD: ${SILO_ROOT_PASSWORD:-melee-admin-password}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - mc alias set local http://silo:9000 "$$SILO_ROOT_USER" "$$SILO_ROOT_PASSWORD" && mc mb --ignore-existing local/lakehouse
+    restart: "no"
+
+  lakekeeper-migrate:
+    image: quay.io/lakekeeper/catalog:v0.14.0
+    command: ["migrate"]
+    environment: *lakekeeper-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  lakekeeper:
+    image: quay.io/lakekeeper/catalog:v0.14.0
+    command: ["serve"]
+    environment: *lakekeeper-env
+    ports:
+      - "8181:8181"
+    depends_on:
+      lakekeeper-migrate:
+        condition: service_completed_successfully
+      create-bucket:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 2s
+      timeout: 10s
+      retries: 30
+
+  lakekeeper-bootstrap:
+    # Succeeds on 2xx, or on the 400 CatalogAlreadyBootstrapped that a re-run returns.
+    image: curlimages/curl:8.22.0
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -eu
+        url=http://lakekeeper:8181/management/v1/bootstrap
+        body='{"accept-terms-of-use": true}'
+        : > /tmp/body  # curl leaves no file behind on an empty response
+        status=$$(curl -sS -o /tmp/body -w '%{http_code}' -X POST "$$url" -H "Content-Type: application/json" --data "$$body")
+        case "$$status" in
+          2??) echo "lakekeeper bootstrapped (HTTP $$status)"; exit 0 ;;
+          4??) if grep -q CatalogAlreadyBootstrapped /tmp/body; then
+                 echo "lakekeeper already bootstrapped"; exit 0
+               fi ;;
+        esac
+        echo "lakekeeper bootstrap failed (HTTP $$status):"
+        cat /tmp/body; echo
+        exit 1
+    restart: "no"
+
+  lakekeeper-warehouse:
+    image: curlimages/curl:8.22.0
+    depends_on:
+      lakekeeper-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      SILO_ROOT_USER: ${SILO_ROOT_USER:-melee-admin}
+      SILO_ROOT_PASSWORD: ${SILO_ROOT_PASSWORD:-melee-admin-password}
+    volumes:
+      - ./lakekeeper/create-warehouse.json:/config/create-warehouse.json:ro
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -e
+        if curl -sf http://lakekeeper:8181/management/v1/warehouse | grep -q '"melee"'; then
+          echo "warehouse melee already exists"; exit 0
+        fi
+        sed -e "s|__ACCESS_KEY__|$$SILO_ROOT_USER|" -e "s|__SECRET_KEY__|$$SILO_ROOT_PASSWORD|" \
+          /config/create-warehouse.json > /tmp/warehouse.json
+        curl -sS --fail-with-body -X POST http://lakekeeper:8181/management/v1/warehouse \
+          -H "Content-Type: application/json" --data @/tmp/warehouse.json
+    restart: "no"
+
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    ports:
+      - "9094:9094"
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  kafka-init:
+    image: apache/kafka:4.3.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        for topic in startgg.tournaments.raw startgg.sets.raw startgg.ingest.dlq; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+            --topic "$$topic" --partitions 3 --replication-factor 1 \
+            --config retention.ms=-1 --config cleanup.policy=delete
+        done
+    restart: "no"
+
+  kafka-ui:
+    image: kafbat/kafka-ui:v1.5.0
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      JAVA_OPTS: -Xmx256m
+    ports:
+      - "8085:8080"
+    mem_limit: 512m
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  trino:
+    image: trinodb/trino:483
+    volumes:
+      - ./trino/catalog/lakekeeper.properties:/etc/trino/catalog/lakekeeper.properties:ro
+    ports:
+      - "8090:8080"
+    mem_limit: 1536m
+    depends_on:
+      lakekeeper-warehouse:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/info | grep -q '\"starting\":false'"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  dagster-code:
+    <<: *dagster
+    hostname: dagster-code
+    command: ["dagster", "code-server", "start", "-h", "0.0.0.0", "-p", "4000", "-m", "pipeline.dagster_defs"]
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      <<: *db-env
+      DAGSTER_HOME: /opt/dagster/home
+      STARTGG_FIXTURE_PATH: ${STARTGG_FIXTURE_PATH:-}
+    volumes:
+      - ./dagster/dagster.yaml:/opt/dagster/home/dagster.yaml:ro
+      - checkpoints:/checkpoints
+    mem_limit: 3g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      lakekeeper-warehouse:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "dagster", "api", "grpc-health-check", "-p", "4000"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  dagster-pools:
+    # default_limit only applies once Dagster first sees a pool; set both up front.
+    <<: *dagster
+    command:
+      - bash
+      - -c
+      - dagster instance concurrency set startgg_api 1 && dagster instance concurrency set spark_bronze 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  dagster-webserver:
+    <<: *dagster
+    command: ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-w", "/opt/dagster/workspace.yaml"]
+    ports:
+      - "${DAGSTER_WEBSERVER_PORT:-3000}:3000"
+    mem_limit: 768m
+    depends_on:
+      dagster-code:
+        condition: service_healthy
+      dagster-pools:
+        condition: service_completed_successfully
+
+  dagster-daemon:
+    <<: *dagster
+    command: ["dagster-daemon", "run", "-w", "/opt/dagster/workspace.yaml"]
+    mem_limit: 768m
+    depends_on:
+      dagster-code:
+        condition: service_healthy
+      dagster-pools:
+        condition: service_completed_successfully
+
+  pipeline-tools:
+    # One-off commands: Spark tests, lakehouse checks, ad-hoc bronze runs.
+    <<: *pipeline-image
+    profiles: ["tools"]
+    volumes:
+      - ..:/app
+      - checkpoints:/checkpoints
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      lakekeeper-warehouse:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:
+  silo-data:
+  kafka-data:
+  checkpoints:

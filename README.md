@@ -21,6 +21,51 @@ The best model (XGBoost) achieves **78.5% accuracy** and **0.818 AUC**, signific
 - **Head-to-head records** improve predictions for frequently-matched top players
 - The model's biggest misses are **genuine community-recognized upsets** — not model bugs, but real surprises (e.g., Axe upset at Supernova 2025, Jmook losses at majors)
 
+## Data Platform (in progress)
+
+The project is being rebuilt as a data engineering platform. Every record
+enters through Kafka and lands in an Iceberg lakehouse:
+
+```
+start.gg API --(Dagster, weekly partitions)--> Kafka --(Spark, availableNow)--> Iceberg bronze --> Trino
+```
+
+| Component | Tool | Local URL |
+|---|---|---|
+| Orchestration | Dagster | http://localhost:3000 |
+| Event backbone | Kafka (KRaft) + Kafka UI | http://localhost:8085 |
+| Table catalog | Lakekeeper (Iceberg REST) | http://localhost:8181 |
+| Object storage | Silo (S3-compatible) | http://localhost:9001 |
+| Processing | Spark 4.0 (local mode) | n/a |
+| SQL | Trino | `localhost:8090` |
+
+**Run it** (needs Docker with ~6 GB of memory and GNU make):
+
+```bash
+cp .env.example .env      # then set STARTGG_API_TOKEN
+make up                   # build and start the stack
+make check-lakehouse      # Spark -> Iceberg -> Trino round trip
+```
+
+If port 3000 is taken, set `DAGSTER_WEBSERVER_PORT` in `.env` and Dagster will
+be served there instead.
+
+Then open Dagster and backfill `startgg_raw` from the asset page. The
+`land_bronze_after_ingest` sensor lands each finished week into
+`bronze.startgg_tournaments` and `bronze.startgg_sets`. `make bronze-once`
+runs the bronze job by hand; it refuses to start (exits with "another bronze job
+is running") while a Dagster bronze run holds the checkpoint lock.
+
+**Tests:** `make test` (unit and Dagster), `make test-spark` (Spark
+transforms in the pipeline container), `make smoke` (end to end against a
+recorded week; no API token needed).
+
+**Failure handling:** events that still fail after retries go to the
+`startgg.ingest.dlq` topic and fail the `no_dlq_messages` asset check;
+malformed messages go to `bronze.startgg_rejects` and fail `no_rejects`.
+
+Design: [`docs/superpowers/specs/2026-10-07-ingestion-foundation-design.md`](docs/superpowers/specs/2026-10-07-ingestion-foundation-design.md)
+
 ## Dataset
 
 | | Count |

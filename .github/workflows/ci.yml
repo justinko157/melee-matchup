@@ -4,26 +4,43 @@ on:
   push:
     branches: [master, main]
   pull_request:
-    branches: [master, main]
 
 jobs:
-  lint-and-test:
+  lint-and-unit:
+    timeout-minutes: 20
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.11"
-
+          enable-cache: true
       - name: Install dependencies
+        run: uv sync --frozen --all-extras
+      - name: Lint
+        run: uv run ruff check src/ tests/ app.py pipeline/ scripts/
+      - name: Unit and Dagster tests
+        run: uv run pytest -v
+      - name: Validate Dagster definitions
+        run: uv run dagster definitions validate -m pipeline.dagster_defs
+
+  spark-and-smoke:
+    timeout-minutes: 45
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+      - name: Spark tests
+        run: uv run pytest -m spark -v tests/pipeline
+      - name: Smoke test
         run: |
-          pip install -e ".[dev,ml]"
-
-      - name: Lint with ruff
-        run: ruff check src/ tests/ app.py
-
-      - name: Run tests
-        run: pytest tests/ -v
+          cp .env.example .env
+          make smoke

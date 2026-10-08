@@ -1,5 +1,6 @@
 .git
 .claude
+.superpowers/
 .venv
 venv
 __pycache__
@@ -10,3 +11,5 @@ mlruns
 notebooks
 .env
 .pytest_cache
+docs
+**/*.md
