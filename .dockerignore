@@ -10,3 +10,6 @@ mlruns
 notebooks
 .env
 .pytest_cache
+data
+docs
+*.md

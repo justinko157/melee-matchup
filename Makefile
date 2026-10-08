@@ -1,8 +1,33 @@
-.PHONY: install collect features validate train tune export app test lint docker-build docker-run clean
+SHELL := bash
+.PHONY: install collect features validate train tune export app test lint docker-build docker-run clean up down nuke ps logs check-lakehouse
 
 # ── Setup ──────────────────────────────────────────────
 install:
 	pip install -e ".[dev,ml,app]"
+
+# ── Local stack ────────────────────────────────────────
+COMPOSE := docker compose -f infra/docker-compose.yml --env-file .env
+
+up:
+	$(COMPOSE) up -d --build --wait
+
+down:
+	$(COMPOSE) down
+
+nuke:  ## Stops the stack and DELETES all Kafka, Silo, Postgres and checkpoint data
+	$(COMPOSE) down -v
+
+ps:
+	$(COMPOSE) ps -a
+
+logs:
+	$(COMPOSE) logs -f --tail=100
+
+check-lakehouse:
+	$(COMPOSE) run --rm pipeline-tools spark-submit infra/spark/check_lakehouse.py
+	$(COMPOSE) exec -T trino trino --execute "SELECT * FROM lakekeeper.healthcheck.ping"
+	$(COMPOSE) exec -T trino trino --execute "DROP TABLE lakekeeper.healthcheck.ping"
+	$(COMPOSE) exec -T trino trino --execute "DROP SCHEMA lakekeeper.healthcheck"
 
 # ── Data Pipeline ──────────────────────────────────────
 collect:
