@@ -1,5 +1,6 @@
 """Ingestion and bronze landing assets."""
 
+import warnings
 from datetime import UTC, datetime
 
 import dagster as dg
@@ -8,13 +9,21 @@ from pipeline.dagster_defs.partitions import WEEKLY_PARTITIONS
 from pipeline.dagster_defs.resources import KafkaResource, SparkJobResource, StartGGResource
 from pipeline.ingest.collect import collect_week
 
+# A per-week check keeps a later week's result from hiding an earlier week's DLQ
+# messages. Partitioned check specs are a Dagster preview feature.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", dg.PreviewWarning)
+    NO_DLQ_MESSAGES = dg.AssetCheckSpec(
+        "no_dlq_messages", asset="startgg_raw", partitions_def=WEEKLY_PARTITIONS
+    )
+
 
 @dg.asset(
     partitions_def=WEEKLY_PARTITIONS,
     pool="startgg_api",
     group_name="ingest",
     kinds={"kafka", "python"},
-    check_specs=[dg.AssetCheckSpec("no_dlq_messages", asset="startgg_raw")],
+    check_specs=[NO_DLQ_MESSAGES],
 )
 def startgg_raw(
     context: dg.AssetExecutionContext, startgg: StartGGResource, kafka: KafkaResource
@@ -42,7 +51,10 @@ def startgg_raw(
             dg.AssetCheckResult(
                 check_name="no_dlq_messages",
                 passed=stats.dlq_messages == 0,
-                metadata={"dlq_messages": stats.dlq_messages},
+                metadata={
+                    "dlq_messages": stats.dlq_messages,
+                    "partition_week": context.partition_key,
+                },
             )
         ],
     )

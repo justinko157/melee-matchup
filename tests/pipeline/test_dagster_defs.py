@@ -1,3 +1,4 @@
+import subprocess
 from datetime import UTC, datetime
 from typing import ClassVar
 from zoneinfo import ZoneInfo
@@ -196,3 +197,46 @@ def test_sensor_skips_when_bronze_run_already_queued():
             )
         )
         assert isinstance(land_bronze_after_ingest(sensor_context(result, instance)), dg.SkipReason)
+
+
+def test_dlq_check_is_attributed_to_the_week():
+    (evaluation,) = materialize_raw(scenario="dlq").get_asset_check_evaluations()
+    assert evaluation.partition == "2025-01-06"
+    assert evaluation.metadata["partition_week"].value == "2025-01-06"
+
+
+class FakeCompleted:
+    returncode = 0
+    stdout = '{"tournaments": 1, "sets": 2, "rejects": 0}\n'
+    stderr = ""
+
+
+def test_bronze_job_runs_with_a_timeout_and_without_the_token(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(kwargs)
+        return FakeCompleted()
+
+    monkeypatch.setenv("STARTGG_API_TOKEN", "secret-token-value")
+    monkeypatch.setenv("KEEP_ME", "1")
+    monkeypatch.setattr("pipeline.dagster_defs.resources.subprocess.run", fake_run)
+    summary = SparkJobResource(timeout_seconds=120).run_bronze_job()
+    assert summary == {"tournaments": 1, "sets": 2, "rejects": 0}
+    (kwargs,) = calls
+    assert kwargs["timeout"] == 120
+    assert "STARTGG_API_TOKEN" not in kwargs["env"]
+    assert kwargs["env"]["KEEP_ME"] == "1"
+
+
+def test_bronze_job_timeout_default_is_an_hour():
+    assert SparkJobResource().timeout_seconds == 3600
+
+
+def test_bronze_job_timeout_becomes_a_failure(monkeypatch):
+    def fake_run(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr("pipeline.dagster_defs.resources.subprocess.run", fake_run)
+    with pytest.raises(dg.Failure, match="timed out after 3600s"):
+        SparkJobResource().run_bronze_job()

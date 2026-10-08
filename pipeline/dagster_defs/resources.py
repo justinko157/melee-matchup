@@ -1,6 +1,7 @@
 """Dagster resources wrapping the start.gg client, Kafka and the Spark job."""
 
 import json
+import os
 import subprocess
 from datetime import datetime
 
@@ -65,13 +66,28 @@ class SparkJobResource(dg.ConfigurableResource):
     job_path: str = "/app/pipeline/spark_jobs/bronze_job.py"
     bootstrap_servers: str = "kafka:9092"
     checkpoint_root: str = "/checkpoints/bronze"
+    timeout_seconds: int = 3600
 
     def run_bronze_job(self, since: datetime | None = None) -> dict[str, int]:
         """Run the bronze job, counting rows committed after `since` (default: job start)."""
         command = build_bronze_command(
             self.job_path, self.bootstrap_servers, self.checkpoint_root, since
         )
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        # spark-submit never needs the start.gg token, so keep it out of its environment.
+        env = {k: v for k, v in os.environ.items() if k != "STARTGG_API_TOKEN"}
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+                timeout=self.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            raise dg.Failure(
+                description=f"Bronze Spark job timed out after {self.timeout_seconds}s"
+            ) from None
         if result.returncode != 0:
             raise dg.Failure(
                 description=f"Bronze Spark job exited with code {result.returncode}",
