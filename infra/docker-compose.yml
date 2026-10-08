@@ -111,6 +111,7 @@ services:
         set -eu
         url=http://lakekeeper:8181/management/v1/bootstrap
         body='{"accept-terms-of-use": true}'
+        : > /tmp/body  # curl leaves no file behind on an empty response
         status=$$(curl -sS -o /tmp/body -w '%{http_code}' -X POST "$$url" -H "Content-Type: application/json" --data "$$body")
         case "$$status" in
           2??) echo "lakekeeper bootstrapped (HTTP $$status)"; exit 0 ;;

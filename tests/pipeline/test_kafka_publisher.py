@@ -108,9 +108,9 @@ def test_publish_gives_up_when_queue_stays_full_past_buffer_timeout():
 
     publisher, holder = make({"buffer_timeout": 5.0, "clock": clock}, buffer_full_times=10**9)
     with pytest.raises(DeliveryError) as info:
-        publisher.publish("t", "1", {"secret_payload": "do-not-log"})
+        publisher.publish("melee.raw.test", "1", {"secret_payload": "do-not-log"})
     assert "do-not-log" not in str(info.value)
-    assert "t" in str(info.value)
+    assert "melee.raw.test" in str(info.value)
     assert holder["producer"].produced == []
     assert 1 <= len(holder["producer"].polls) <= 6
     assert publisher.published == 0
