@@ -2,7 +2,7 @@
 name = "melee-matchup"
 version = "0.1.0"
 description = "Predicting tournament set outcomes in competitive Super Smash Bros Melee"
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "requests>=2.31",
     "python-dotenv>=1.0",
@@ -30,13 +30,29 @@ app = [
     "streamlit>=1.30",
     "mlflow>=2.10",
 ]
+pipeline = [
+    "confluent-kafka>=2.16",
+    "dagster>=1.13.25",
+    "dagster-postgres>=0.29.25",
+    "dagster-webserver>=1.13.25",
+    "pyspark==4.0.4",
+    "trino>=0.340",
+]
 
 [project.scripts]
 melee-collect = "src.collect:main"
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-m 'not spark'"
+markers = [
+    "spark: needs a local SparkSession (Java). Run with `make test-spark`.",
+]
