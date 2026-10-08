@@ -11,6 +11,7 @@ from pipeline.ingest.startgg import (
     RequestRejectedError,
     RetriesExhaustedError,
     StartGGClient,
+    StartGGError,
     operation_name,
 )
 
@@ -208,3 +209,68 @@ def test_paginate_null_nodes_is_empty():
 def test_paginate_missing_path_is_empty():
     client, _, _ = make_client(ok({"event": None}))
     assert client.paginate(PAGED_QUERY, {"eventId": 5}, ["event", "sets"]) == []
+
+
+def test_token_with_trailing_newline_is_stripped():
+    session = FakeSession(ok({"event": None}))
+    client = StartGGClient(
+        TOKEN + "\n",
+        session=session,
+        rate_limiter=RateLimiter(max_requests=10_000),
+        sleep=lambda _: None,
+    )
+    assert client.query(QUERY, {}) == {"event": None}
+    assert session.headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+@pytest.mark.parametrize("token", ["", "   ", "\n\t "])
+def test_whitespace_only_token_raises_invalid_token(token):
+    with pytest.raises(InvalidTokenError, match="STARTGG_API_TOKEN") as info:
+        StartGGClient(token)
+    assert "STARTGG_API_TOKEN" in str(info.value)
+
+
+def test_request_exception_is_wrapped_without_token():
+    bad_header = requests.exceptions.InvalidHeader(f"Invalid header value Bearer {TOKEN}\n")
+    client, _, _ = make_client(bad_header)
+    with pytest.raises(StartGGError) as info:
+        client.query(QUERY, {})
+    assert not isinstance(info.value, requests.exceptions.RequestException)
+    assert "InvalidHeader" in str(info.value)
+    assert "EventSets" in str(info.value)
+    assert TOKEN not in str(info.value)
+    assert TOKEN not in repr(info.value)
+
+
+def test_request_rejected_body_is_redacted():
+    client, _, _ = make_client(FakeResponse(404, text=f"no such event for token {TOKEN}"))
+    with pytest.raises(RequestRejectedError) as info:
+        client.query(QUERY, {})
+    assert "[REDACTED]" in str(info.value)
+    assert TOKEN not in str(info.value)
+    assert TOKEN not in repr(info.value)
+
+
+def test_graphql_error_payload_is_redacted():
+    errors = [{"message": f"bad input from {TOKEN}"}]
+    client, _, _ = make_client(FakeResponse(200, {"errors": errors}))
+    with pytest.raises(GraphQLError) as info:
+        client.query(QUERY, {})
+    assert "[REDACTED]" in str(info.value)
+    assert TOKEN not in str(info.value)
+    assert TOKEN not in repr(info.value)
+
+
+def test_long_complexity_payload_is_classified_and_truncated():
+    errors = [{"message": "query complexity is too high"}, {"message": "x" * 2000}]
+    client, _, _ = make_client(FakeResponse(200, {"errors": errors}))
+    with pytest.raises(ComplexityError) as info:
+        client.query(QUERY, {})
+    assert len(str(info.value)) <= 500
+
+
+def test_long_non_token_4xx_body_is_truncated():
+    client, _, _ = make_client(FakeResponse(404, text="y" * 2000))
+    with pytest.raises(RequestRejectedError) as info:
+        client.query(QUERY, {})
+    assert len(str(info.value)) <= 600

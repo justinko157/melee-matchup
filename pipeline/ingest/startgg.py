@@ -20,6 +20,8 @@ MAX_ATTEMPTS = 4
 BACKOFF_BASE_SECONDS = 2.0  # waits 2s, 4s, 8s between attempts
 MIN_PAGE_SIZE = 5
 TOKEN_HELP = "Create a new token at https://start.gg/admin/profile/developer"
+MAX_ERROR_TEXT = 500  # longest server-supplied text kept in an exception message
+REDACTED = "[REDACTED]"
 
 
 class StartGGError(Exception):
@@ -58,13 +60,21 @@ def operation_name(query: str) -> str:
     return match.group(1)
 
 
-def _classify_graphql_errors(errors: list) -> GraphQLError:
+def _scrub(text: str, token: str) -> str:
+    """Redact the token from server-supplied text and truncate it for an error message."""
+    if token:
+        text = text.replace(token, REDACTED)
+    return text[:MAX_ERROR_TEXT]
+
+
+def _classify_graphql_errors(errors: list, token: str) -> GraphQLError:
+    # Classify on the full server text; only the message stored on the exception is scrubbed.
     text = str(errors)
     if "complexity" in text.lower():
-        return ComplexityError(text)
+        return ComplexityError(_scrub(text, token))
     if "10,000" in text or "10000" in text:
-        return PaginationCapError(text)
-    return GraphQLError(text)
+        return PaginationCapError(_scrub(text, token))
+    return GraphQLError(_scrub(text, token))
 
 
 class RateLimiter:
@@ -109,8 +119,10 @@ class StartGGClient:
         rate_limiter: RateLimiter | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ):
+        token = (token or "").strip()
         if not token:
             raise InvalidTokenError(f"STARTGG_API_TOKEN is empty. Set it in .env. {TOKEN_HELP}")
+        self._token = token
         self._session = session or requests.Session()
         self._session.headers.update(
             {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -137,6 +149,12 @@ class StartGGClient:
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
                 last_error = repr(exc)
                 continue
+            except requests.exceptions.RequestException as exc:
+                # Other request errors (e.g. InvalidHeader) can embed headers, so only the
+                # exception class and operation name are kept.
+                raise StartGGError(
+                    f"{type(exc).__name__} while calling {operation_name(query)}"
+                ) from None
             if resp.status_code == 429 or resp.status_code >= 500:
                 last_error = f"HTTP {resp.status_code}"
                 continue
@@ -147,10 +165,12 @@ class StartGGClient:
                     f"start.gg rejected STARTGG_API_TOKEN (HTTP {resp.status_code}). {TOKEN_HELP}"
                 )
             if resp.status_code >= 400:
-                raise RequestRejectedError(f"HTTP {resp.status_code}: {resp.text[:500]}")
+                raise RequestRejectedError(
+                    f"HTTP {resp.status_code}: {_scrub(resp.text, self._token)}"
+                )
             body = resp.json()
             if body.get("errors"):
-                raise _classify_graphql_errors(body["errors"])
+                raise _classify_graphql_errors(body["errors"], self._token)
             return body["data"]
         raise RetriesExhaustedError(
             f"{operation_name(query)} failed after {MAX_ATTEMPTS} attempts: {last_error}"
