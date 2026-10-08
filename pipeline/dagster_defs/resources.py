@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from datetime import datetime
 
 import dagster as dg
 
@@ -32,8 +33,10 @@ class KafkaResource(dg.ConfigurableResource):
         return KafkaPublisher(self.bootstrap_servers)
 
 
-def build_bronze_command(job_path: str, bootstrap_servers: str, checkpoint_root: str) -> list[str]:
-    return [
+def build_bronze_command(
+    job_path: str, bootstrap_servers: str, checkpoint_root: str, since: datetime | None = None
+) -> list[str]:
+    command = [
         "spark-submit",
         job_path,
         "--bootstrap-servers",
@@ -41,6 +44,9 @@ def build_bronze_command(job_path: str, bootstrap_servers: str, checkpoint_root:
         "--checkpoint-root",
         checkpoint_root,
     ]
+    if since is not None:
+        command += ["--since", since.isoformat()]
+    return command
 
 
 def parse_job_summary(stdout: str) -> dict[str, int]:
@@ -60,8 +66,11 @@ class SparkJobResource(dg.ConfigurableResource):
     bootstrap_servers: str = "kafka:9092"
     checkpoint_root: str = "/checkpoints/bronze"
 
-    def run_bronze_job(self) -> dict[str, int]:
-        command = build_bronze_command(self.job_path, self.bootstrap_servers, self.checkpoint_root)
+    def run_bronze_job(self, since: datetime | None = None) -> dict[str, int]:
+        """Run the bronze job, counting rows committed after `since` (default: job start)."""
+        command = build_bronze_command(
+            self.job_path, self.bootstrap_servers, self.checkpoint_root, since
+        )
         result = subprocess.run(command, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             raise dg.Failure(

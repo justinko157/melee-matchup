@@ -1,5 +1,7 @@
 """Ingestion and bronze landing assets."""
 
+from datetime import UTC, datetime
+
 import dagster as dg
 
 from pipeline.dagster_defs.partitions import WEEKLY_PARTITIONS
@@ -46,6 +48,15 @@ def startgg_raw(
     )
 
 
+def _run_start(context: dg.AssetExecutionContext) -> datetime | None:
+    # Retries are new spark-submits; counting from the run's start (not each
+    # attempt's) keeps rows landed by a failed attempt in the totals.
+    record = context.instance.get_run_record_by_id(context.run.run_id)
+    if record is None or record.start_time is None:
+        return None
+    return datetime.fromtimestamp(record.start_time, UTC)
+
+
 @dg.asset(
     deps=[startgg_raw],
     pool="spark_bronze",
@@ -54,9 +65,11 @@ def startgg_raw(
     retry_policy=dg.RetryPolicy(max_retries=2, delay=30, backoff=dg.Backoff.EXPONENTIAL),
     check_specs=[dg.AssetCheckSpec("no_rejects", asset="bronze_startgg")],
 )
-def bronze_startgg(spark_job: SparkJobResource) -> dg.MaterializeResult:
+def bronze_startgg(
+    context: dg.AssetExecutionContext, spark_job: SparkJobResource
+) -> dg.MaterializeResult:
     """Everything new in the raw topics, landed into the Iceberg bronze tables."""
-    summary = spark_job.run_bronze_job()
+    summary = spark_job.run_bronze_job(since=_run_start(context))
     return dg.MaterializeResult(
         metadata={
             "tournament_rows": summary["tournaments"],

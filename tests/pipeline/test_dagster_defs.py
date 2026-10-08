@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import ClassVar
 from zoneinfo import ZoneInfo
 
@@ -47,8 +47,10 @@ class FakeKafka(KafkaResource):
 
 class FakeSpark(SparkJobResource):
     rejects: int = 0
+    calls: ClassVar[list[datetime | None]] = []
 
-    def run_bronze_job(self):
+    def run_bronze_job(self, since=None):
+        FakeSpark.calls.append(since)
         return {"tournaments": 1, "sets": 2, "rejects": self.rejects}
 
 
@@ -112,6 +114,25 @@ def test_parse_job_summary_reads_last_line():
 def test_parse_job_summary_rejects_bad_output(stdout):
     with pytest.raises(ValueError):
         parse_job_summary(stdout)
+
+
+def test_build_bronze_command_passes_since():
+    since = datetime(2025, 1, 6, 16, 0, tzinfo=UTC)
+    assert build_bronze_command("/job.py", "kafka:9092", "/ck", since)[-2:] == [
+        "--since",
+        "2025-01-06T16:00:00+00:00",
+    ]
+
+
+def test_bronze_counts_from_the_run_start():
+    # Every retry attempt of a run must count rows from the same moment.
+    FakeSpark.calls.clear()
+    with dg.instance_for_test() as instance:
+        result = dg.materialize(
+            [bronze_startgg], resources={"spark_job": FakeSpark()}, instance=instance
+        )
+        start = instance.get_run_record_by_id(result.run_id).start_time
+    assert FakeSpark.calls == [datetime.fromtimestamp(start, UTC)]
 
 
 def test_build_bronze_command():
