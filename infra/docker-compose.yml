@@ -16,6 +16,15 @@ x-lakekeeper-env: &lakekeeper-env
   LAKEKEEPER__PG_DATABASE_URL_WRITE: postgresql://${POSTGRES_USER:-melee}:${POSTGRES_PASSWORD:-melee}@postgres:5432/lakekeeper
   RUST_LOG: info
 
+x-dagster: &dagster
+  <<: *pipeline-image
+  environment:
+    <<: *db-env
+    DAGSTER_HOME: /opt/dagster/home
+  volumes:
+    - ./dagster/dagster.yaml:/opt/dagster/home/dagster.yaml:ro
+    - ./dagster/workspace.yaml:/opt/dagster/workspace.yaml:ro
+
 services:
   postgres:
     image: postgres:17.11
@@ -204,6 +213,68 @@ services:
       interval: 5s
       timeout: 10s
       retries: 30
+
+  dagster-code:
+    <<: *dagster
+    hostname: dagster-code
+    command: ["dagster", "code-server", "start", "-h", "0.0.0.0", "-p", "4000", "-m", "pipeline.dagster_defs"]
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      <<: *db-env
+      DAGSTER_HOME: /opt/dagster/home
+      STARTGG_FIXTURE_PATH: ${STARTGG_FIXTURE_PATH:-}
+    volumes:
+      - ./dagster/dagster.yaml:/opt/dagster/home/dagster.yaml:ro
+      - checkpoints:/checkpoints
+    mem_limit: 3g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      lakekeeper-warehouse:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "dagster", "api", "grpc-health-check", "-p", "4000"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  dagster-pools:
+    # default_limit only applies once Dagster first sees a pool; set both up front.
+    <<: *dagster
+    command:
+      - bash
+      - -c
+      - dagster instance concurrency set startgg_api 1 && dagster instance concurrency set spark_bronze 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  dagster-webserver:
+    <<: *dagster
+    command: ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-w", "/opt/dagster/workspace.yaml"]
+    ports:
+      - "${DAGSTER_WEBSERVER_PORT:-3000}:3000"
+    mem_limit: 768m
+    depends_on:
+      dagster-code:
+        condition: service_healthy
+      dagster-pools:
+        condition: service_completed_successfully
+
+  dagster-daemon:
+    <<: *dagster
+    command: ["dagster-daemon", "run", "-w", "/opt/dagster/workspace.yaml"]
+    mem_limit: 768m
+    depends_on:
+      dagster-code:
+        condition: service_healthy
+      dagster-pools:
+        condition: service_completed_successfully
 
   pipeline-tools:
     # One-off commands: Spark tests, lakehouse checks, ad-hoc bronze runs.
