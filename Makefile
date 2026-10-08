@@ -1,5 +1,5 @@
 SHELL := bash
-.PHONY: install collect features validate train tune export app test lint docker-build docker-run clean up down nuke ps logs check-lakehouse
+.PHONY: install collect features validate train tune export app test lint docker-build docker-run clean up down nuke ps logs check-lakehouse test-spark
 
 # ── Setup ──────────────────────────────────────────────
 install:
@@ -28,6 +28,9 @@ check-lakehouse:
 	$(COMPOSE) exec -T trino trino --execute "SELECT * FROM lakekeeper.healthcheck.ping"
 	$(COMPOSE) exec -T trino trino --execute "DROP TABLE lakekeeper.healthcheck.ping"
 	$(COMPOSE) exec -T trino trino --execute "DROP SCHEMA lakekeeper.healthcheck"
+
+test-spark:
+	$(COMPOSE) run --rm --no-deps pipeline-tools pytest -m spark -v tests/pipeline
 
 # ── Data Pipeline ──────────────────────────────────────
 collect:
