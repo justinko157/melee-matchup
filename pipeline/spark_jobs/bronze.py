@@ -100,7 +100,7 @@ def parse_envelopes(kafka_df: DataFrame) -> DataFrame:
             "missing_required_field",
         )
         .when(ingested_ts.isNull(), "invalid_ingested_at")
-        .when(F.col("env.entity") != F.col("expected_entity"), "entity_topic_mismatch")
+        .when(~F.col("env.entity").eqNullSafe(F.col("expected_entity")), "entity_topic_mismatch")
     )
     return parsed.select(
         "*", ingested_ts.alias("ingested_ts"), reject_reason.alias("reject_reason")

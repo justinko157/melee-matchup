@@ -119,3 +119,23 @@ def test_rejects_keep_raw_bytes(spark):
 def test_rejected_rows_never_reach_bronze(spark):
     parsed = parse_envelopes(kafka_df(spark, [(SETS_TOPIC, "garbage"), (SETS_TOPIC, envelope())]))
     assert bronze_rows(parsed, "set").count() == 1
+
+
+def test_unknown_topic_is_rejected(spark):
+    assert reasons(spark, [("some.other.topic", envelope())]) == ["entity_topic_mismatch"]
+
+
+def test_every_input_row_lands_in_exactly_one_place(spark):
+    rows = [
+        (SETS_TOPIC, envelope()),
+        (TOURNAMENTS_TOPIC, envelope(entity="tournament", entity_id=1)),
+        (SETS_TOPIC, "garbage"),
+        (SETS_TOPIC, None),
+        (TOURNAMENTS_TOPIC, envelope(entity="set")),
+        ("some.other.topic", envelope()),
+        ("some.other.topic", envelope(entity="tournament", entity_id=2)),
+    ]
+    parsed = parse_envelopes(kafka_df(spark, rows))
+    accepted = bronze_rows(parsed, "set").count() + bronze_rows(parsed, "tournament").count()
+    assert accepted == 2
+    assert accepted + reject_rows(parsed).count() == len(rows)
