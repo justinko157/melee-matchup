@@ -31,6 +31,9 @@ def main() -> None:
     expected = collect_week(
         FixtureClient(args.fixture), CountingPublisher(), args.week, run_id="check"
     )
+    # An empty fixture would make every count below trivially match.
+    assert expected.tournaments > 0, f"fixture has no eligible tournaments for {args.week}"
+    assert expected.sets > 0, f"fixture has no sets for {args.week}"
     cursor = trino.dbapi.connect(
         host="trino", port=8080, user="smoke", catalog="lakekeeper", schema="bronze"
     ).cursor()

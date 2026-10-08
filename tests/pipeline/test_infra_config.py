@@ -35,3 +35,14 @@ def test_compose_images_are_pinned():
         if image == "melee-pipeline:dev":
             continue
         assert ":" in image and not image.endswith((":latest", ":latest-main")), image
+
+
+def test_lakekeeper_bootstrap_only_tolerates_already_bootstrapped():
+    service = COMPOSE.split("lakekeeper-bootstrap:", 1)[1].split("\n  lakekeeper-warehouse:", 1)[0]
+    assert "CatalogAlreadyBootstrapped" in service
+    assert "exit 1" in service
+
+
+def test_makefile_env_file_is_optional():
+    makefile = Path("Makefile").read_text(encoding="utf-8")
+    assert "$(if $(wildcard .env),--env-file .env)" in makefile

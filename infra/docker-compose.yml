@@ -99,20 +99,28 @@ services:
       retries: 30
 
   lakekeeper-bootstrap:
-    # Re-running on an already bootstrapped server returns an error status, which is fine.
+    # Succeeds on 2xx, or on the 400 CatalogAlreadyBootstrapped that a re-run returns.
     image: curlimages/curl:8.22.0
     depends_on:
       lakekeeper:
         condition: service_healthy
+    entrypoint: /bin/sh
     command:
-      - -sS
-      - -X
-      - POST
-      - http://lakekeeper:8181/management/v1/bootstrap
-      - -H
-      - "Content-Type: application/json"
-      - --data
-      - '{"accept-terms-of-use": true}'
+      - -c
+      - |
+        set -eu
+        url=http://lakekeeper:8181/management/v1/bootstrap
+        body='{"accept-terms-of-use": true}'
+        status=$$(curl -sS -o /tmp/body -w '%{http_code}' -X POST "$$url" -H "Content-Type: application/json" --data "$$body")
+        case "$$status" in
+          2??) echo "lakekeeper bootstrapped (HTTP $$status)"; exit 0 ;;
+          4??) if grep -q CatalogAlreadyBootstrapped /tmp/body; then
+                 echo "lakekeeper already bootstrapped"; exit 0
+               fi ;;
+        esac
+        echo "lakekeeper bootstrap failed (HTTP $$status):"
+        cat /tmp/body; echo
+        exit 1
     restart: "no"
 
   lakekeeper-warehouse:

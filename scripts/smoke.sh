@@ -3,6 +3,7 @@
 # Uses a separate Compose project with no host ports and no daemon, so it can
 # run next to the dev stack and nothing else launches runs mid-test.
 set -euo pipefail
+cd "$(dirname "$0")/.."
 
 # Git Bash would rewrite the absolute container paths below into Windows paths.
 export MSYS_NO_PATHCONV=1
@@ -11,7 +12,7 @@ WEEK=2025-01-06
 FIXTURE=/app/tests/fixtures/startgg/week_${WEEK}.json
 COMPOSE=(docker compose -f infra/docker-compose.yml -f infra/docker-compose.smoke.yml -p melee-smoke)
 
-cleanup() { "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true; }
+cleanup() { "${COMPOSE[@]}" down -v --remove-orphans >/dev/null || true; }
 trap cleanup EXIT
 cleanup
 

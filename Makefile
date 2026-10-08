@@ -6,7 +6,8 @@ install:
 	uv sync --all-extras
 
 # ── Local stack ────────────────────────────────────────
-COMPOSE := docker compose -f infra/docker-compose.yml --env-file .env
+# .env is optional so a fresh clone can still run compose with the defaults.
+COMPOSE := docker compose -f infra/docker-compose.yml $(if $(wildcard .env),--env-file .env)
 
 up:
 	$(COMPOSE) up -d --build --wait
@@ -25,7 +26,11 @@ logs:
 
 check-lakehouse:
 	$(COMPOSE) run --rm pipeline-tools spark-submit infra/spark/check_lakehouse.py
-	$(COMPOSE) exec -T trino trino --execute "SELECT * FROM lakekeeper.healthcheck.ping"
+	out="$$($(COMPOSE) exec -T trino trino --execute "SELECT * FROM lakekeeper.healthcheck.ping")"; \
+	  echo "$$out"; \
+	  grep -q '"1","ok"' <<<"$$out" \
+	  || { echo 'trino lakehouse check FAILED: expected row "1","ok"' >&2; exit 1; }
+	@echo "trino lakehouse check ok"
 	$(COMPOSE) exec -T trino trino --execute "DROP TABLE lakekeeper.healthcheck.ping"
 	$(COMPOSE) exec -T trino trino --execute "DROP SCHEMA lakekeeper.healthcheck"
 
