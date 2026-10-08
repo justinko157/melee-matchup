@@ -5,11 +5,6 @@ from zoneinfo import ZoneInfo
 
 import dagster as dg
 import pytest
-from dagster._core.remote_origin import (
-    RegisteredCodeLocationOrigin,
-    RemoteJobOrigin,
-    RemoteRepositoryOrigin,
-)
 
 from pipeline.dagster_defs import defs
 from pipeline.dagster_defs.assets import bronze_startgg, startgg_raw
@@ -181,6 +176,14 @@ def test_sensor_ignores_other_runs():
 
 
 def test_sensor_skips_when_bronze_run_already_queued():
+    # Private module, imported here so a Dagster upgrade that moves it only breaks
+    # this test; the NOT_STARTED test below covers the same skip with public APIs.
+    from dagster._core.remote_origin import (
+        RegisteredCodeLocationOrigin,
+        RemoteJobOrigin,
+        RemoteRepositoryOrigin,
+    )
+
     with dg.instance_for_test() as instance:
         result = materialize_raw(instance=instance)
         # Dagster requires queued runs to record where their job came from.
@@ -194,6 +197,20 @@ def test_sensor_skips_when_bronze_run_already_queued():
                 run_id="queued-1",
                 status=dg.DagsterRunStatus.QUEUED,
                 remote_job_origin=origin,
+            )
+        )
+        assert isinstance(land_bronze_after_ingest(sensor_context(result, instance)), dg.SkipReason)
+
+
+def test_sensor_skips_when_bronze_run_not_started():
+    with dg.instance_for_test() as instance:
+        result = materialize_raw(instance=instance)
+        assert isinstance(land_bronze_after_ingest(sensor_context(result, instance)), dg.RunRequest)
+        instance.add_run(
+            dg.DagsterRun(
+                job_name="land_bronze",
+                run_id="not-started-1",
+                status=dg.DagsterRunStatus.NOT_STARTED,
             )
         )
         assert isinstance(land_bronze_after_ingest(sensor_context(result, instance)), dg.SkipReason)

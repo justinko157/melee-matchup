@@ -41,6 +41,7 @@ BRONZE_COLUMNS = (
     "query_variables",
     "payload",
 )
+REJECT_COLUMNS = (*KAFKA_COLUMNS, "raw_key", "raw_value", "reject_reason", "rejected_at")
 
 
 def bronze_table_ddl(table: str) -> str:

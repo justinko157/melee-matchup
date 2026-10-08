@@ -72,6 +72,20 @@ def added_rows_since(spark: SparkSession, table: str, since: datetime) -> int:
     return int(spark.sql(added_rows_sql(table, since)).first().n)
 
 
+def await_all(queries: list[StreamingQuery]) -> None:
+    """Wait for every query; if one fails, stop the rest before the error propagates."""
+    try:
+        for query in queries:
+            query.awaitTermination()
+    finally:
+        for query in queries:
+            if query.isActive:
+                try:
+                    query.stop()
+                except Exception as exc:  # keep stopping the others; stdout stays JSON-only
+                    print(f"failed to stop streaming query: {exc!r}", file=sys.stderr)
+
+
 def lock_checkpoints(checkpoint_root: str) -> IO:
     """Hold an exclusive lock on the checkpoint root, or exit if another job holds it.
 
@@ -129,8 +143,7 @@ def main(argv: list[str] | None = None) -> None:
             f"{root}/rejects",
         ),
     ]
-    for query in queries:
-        query.awaitTermination()
+    await_all(queries)
 
     summary = {
         "tournaments": added_rows_since(spark, BRONZE_TABLES["tournament"], started),

@@ -19,7 +19,13 @@ from pyspark.sql.types import (  # noqa: E402
     TimestampType,
 )
 
-from pipeline.spark_jobs.bronze import bronze_rows, parse_envelopes, reject_rows  # noqa: E402
+from pipeline.spark_jobs.bronze import (  # noqa: E402
+    BRONZE_COLUMNS,
+    REJECT_COLUMNS,
+    bronze_rows,
+    parse_envelopes,
+    reject_rows,
+)
 
 KAFKA_SCHEMA = StructType(
     [
@@ -139,3 +145,9 @@ def test_every_input_row_lands_in_exactly_one_place(spark):
     accepted = bronze_rows(parsed, "set").count() + bronze_rows(parsed, "tournament").count()
     assert accepted == 2
     assert accepted + reject_rows(parsed).count() == len(rows)
+
+
+def test_output_columns_match_declared_columns(spark):
+    parsed = parse_envelopes(kafka_df(spark, [(SETS_TOPIC, envelope())]))
+    assert tuple(bronze_rows(parsed, "set").columns) == BRONZE_COLUMNS
+    assert tuple(reject_rows(parsed).columns) == REJECT_COLUMNS
