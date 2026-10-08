@@ -53,7 +53,8 @@ be served there instead.
 Then open Dagster and backfill `startgg_raw` from the asset page. The
 `land_bronze_after_ingest` sensor lands each finished week into
 `bronze.startgg_tournaments` and `bronze.startgg_sets`. `make bronze-once`
-runs the bronze job by hand.
+runs the bronze job by hand; it refuses to start (exits with "another bronze job
+is running") while a Dagster bronze run holds the checkpoint lock.
 
 **Tests:** `make test` (unit and Dagster), `make test-spark` (Spark
 transforms in the pipeline container), `make smoke` (end to end against a

@@ -7,7 +7,10 @@ goes through Iceberg's exactly-once streaming sink.
 
 import argparse
 import json
+import os
+import sys
 from datetime import UTC, datetime
+from typing import IO
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.streaming import StreamingQuery
@@ -69,6 +72,24 @@ def added_rows_since(spark: SparkSession, table: str, since: datetime) -> int:
     return int(spark.sql(added_rows_sql(table, since)).first().n)
 
 
+def lock_checkpoints(checkpoint_root: str) -> IO:
+    """Hold an exclusive lock on the checkpoint root, or exit if another job holds it.
+
+    `make bronze-once` and Dagster bronze runs share the checkpoint volume, and two
+    streaming queries on one checkpoint corrupt it. Keep the returned file open.
+    """
+    import fcntl  # Linux only; imported here so the module still imports on Windows hosts
+
+    os.makedirs(checkpoint_root, exist_ok=True)
+    lock_file = open(os.path.join(checkpoint_root, ".lock"), "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        sys.exit(f"another bronze job is running (lock held on {checkpoint_root}/.lock)")
+    return lock_file
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bootstrap-servers", required=True)
@@ -79,6 +100,7 @@ def main(argv: list[str] | None = None) -> None:
         help="Count rows committed after this ISO-8601 time instead of the job's start",
     )
     args = parser.parse_args(argv)
+    lock = lock_checkpoints(args.checkpoint_root)
 
     spark = SparkSession.builder.appName("bronze-startgg").getOrCreate()
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {BRONZE_NAMESPACE}")
@@ -116,6 +138,7 @@ def main(argv: list[str] | None = None) -> None:
         "rejects": added_rows_since(spark, REJECTS_TABLE, started),
     }
     spark.stop()
+    lock.close()
     print(json.dumps(summary))
 
 
