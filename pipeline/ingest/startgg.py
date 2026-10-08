@@ -33,7 +33,7 @@ class InvalidTokenError(StartGGError):
 
 
 class RetriesExhaustedError(StartGGError):
-    """Transient failures (429, 5xx, timeouts) persisted past MAX_ATTEMPTS."""
+    """Transient failures (429, 5xx, timeouts, malformed 2xx) persisted past MAX_ATTEMPTS."""
 
 
 class RequestRejectedError(StartGGError):
@@ -146,7 +146,11 @@ class StartGGClient:
             self.api_calls += 1
             try:
                 resp = self._session.post(API_URL, json=payload, timeout=30)
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            except (
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError,
+            ) as exc:
                 last_error = repr(exc)
                 continue
             except requests.exceptions.RequestException as exc:
@@ -168,9 +172,17 @@ class StartGGClient:
                 raise RequestRejectedError(
                     f"HTTP {resp.status_code}: {_scrub(resp.text, self._token)}"
                 )
-            body = resp.json()
+            try:
+                body = resp.json()
+            except ValueError:
+                # A truncated or non-JSON 2xx body; the body itself is not kept.
+                last_error = f"HTTP {resp.status_code} with a body that is not JSON"
+                continue
             if body.get("errors"):
                 raise _classify_graphql_errors(body["errors"], self._token)
+            if "data" not in body:
+                last_error = f"HTTP {resp.status_code} without 'data'"
+                continue
             return body["data"]
         raise RetriesExhaustedError(
             f"{operation_name(query)} failed after {MAX_ATTEMPTS} attempts: {last_error}"

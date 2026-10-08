@@ -274,3 +274,36 @@ def test_long_non_token_4xx_body_is_truncated():
     with pytest.raises(RequestRejectedError) as info:
         client.query(QUERY, {})
     assert len(str(info.value)) <= 600
+
+
+class BadJSONResponse(FakeResponse):
+    def json(self):
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        requests.exceptions.ChunkedEncodingError(),
+        BadJSONResponse(200, text="<html>"),
+        FakeResponse(200, {"message": "no data here"}),
+    ],
+)
+def test_truncated_or_malformed_2xx_is_retried(first):
+    client, session, sleeps = make_client(first, ok({"event": None}))
+    assert client.query(QUERY, {}) == {"event": None}
+    assert len(session.calls) == 2
+    assert sleeps == [2.0]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [BadJSONResponse(200, text=f"<html>{TOKEN}"), FakeResponse(200, {"message": TOKEN})],
+)
+def test_malformed_2xx_exhausts_retries_without_token(response):
+    client, session, _ = make_client(*[response] * MAX_ATTEMPTS)
+    with pytest.raises(RetriesExhaustedError, match="EventSets") as info:
+        client.query(QUERY, {})
+    assert len(session.calls) == MAX_ATTEMPTS
+    assert TOKEN not in str(info.value)
+    assert TOKEN not in repr(info.value)
