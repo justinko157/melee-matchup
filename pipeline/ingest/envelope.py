@@ -22,6 +22,8 @@ def build_envelope(
     ingested_at: datetime,
 ) -> dict:
     """Wrap one API node with the metadata every raw message carries."""
+    if entity_id is None:
+        raise ValueError(f"entity_id is required for a {entity} envelope")
     if ingested_at.tzinfo is None:
         raise ValueError("ingested_at must be timezone-aware")
     return {

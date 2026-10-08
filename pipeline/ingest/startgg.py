@@ -18,6 +18,7 @@ MAX_REQUESTS_PER_WINDOW = 80
 WINDOW_SECONDS = 60.0
 MAX_ATTEMPTS = 4
 BACKOFF_BASE_SECONDS = 2.0  # waits 2s, 4s, 8s between attempts
+MAX_RETRY_AFTER_SECONDS = 60.0  # longest server-requested Retry-After wait honored
 MIN_PAGE_SIZE = 5
 TOKEN_HELP = "Create a new token at https://start.gg/admin/profile/developer"
 MAX_ERROR_TEXT = 500  # longest server-supplied text kept in an exception message
@@ -52,12 +53,24 @@ class PaginationCapError(GraphQLError):
     """start.gg refuses to page past its 10,000th result."""
 
 
+ANONYMOUS_OPERATION = "anonymous"
+
+
 def operation_name(query: str) -> str:
-    """Return the GraphQL operation name, e.g. 'EventSets'."""
+    """Return the GraphQL operation name, e.g. 'EventSets', or 'anonymous' if it has none."""
     match = re.search(r"\bquery\s+(\w+)", query)
     if not match:
-        raise ValueError("GraphQL query has no operation name")
+        return ANONYMOUS_OPERATION
     return match.group(1)
+
+
+def _retry_after_seconds(resp) -> float | None:
+    """Parse an integer-seconds Retry-After header; None if absent or unparseable."""
+    value = (getattr(resp, "headers", None) or {}).get("Retry-After")
+    try:
+        return float(int(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
 
 
 def _scrub(text: str, token: str) -> str:
@@ -135,9 +148,13 @@ class StartGGClient:
         """Run one GraphQL request and return its 'data'."""
         payload = {"query": query, "variables": variables}
         last_error: object = None
+        retry_after: float | None = None
         for attempt in range(MAX_ATTEMPTS):
             if attempt:
                 wait = BACKOFF_BASE_SECONDS**attempt
+                if retry_after is not None:
+                    wait = min(max(wait, retry_after), MAX_RETRY_AFTER_SECONDS)
+                retry_after = None
                 logger.warning(
                     "Retrying %s in %.0fs after: %s", operation_name(query), wait, last_error
                 )
@@ -151,7 +168,8 @@ class StartGGClient:
                 requests.exceptions.ConnectionError,
                 requests.exceptions.ChunkedEncodingError,
             ) as exc:
-                last_error = repr(exc)
+                # Transport errors can echo request details, so scrub like server text.
+                last_error = _scrub(repr(exc), self._token)
                 continue
             except requests.exceptions.RequestException as exc:
                 # Other request errors (e.g. InvalidHeader) can embed headers, so only the
@@ -161,6 +179,7 @@ class StartGGClient:
                 ) from None
             if resp.status_code == 429 or resp.status_code >= 500:
                 last_error = f"HTTP {resp.status_code}"
+                retry_after = _retry_after_seconds(resp)
                 continue
             if resp.status_code == 401 or (
                 resp.status_code == 400 and "authentication token" in resp.text.lower()
@@ -177,6 +196,9 @@ class StartGGClient:
             except ValueError:
                 # A truncated or non-JSON 2xx body; the body itself is not kept.
                 last_error = f"HTTP {resp.status_code} with a body that is not JSON"
+                continue
+            if not isinstance(body, dict):
+                last_error = f"HTTP {resp.status_code} with a JSON body that is not an object"
                 continue
             if body.get("errors"):
                 raise _classify_graphql_errors(body["errors"], self._token)

@@ -111,3 +111,19 @@ def test_invalid_token_propagates():
 def test_discovery_failure_fails_the_run():
     with pytest.raises(RetriesExhaustedError):
         run(FakePaginator([], discovery_error=RetriesExhaustedError("down")))
+
+
+def test_tournaments_and_events_without_id_are_skipped():
+    no_id_event = {"id": None, "name": "E?", "videogame": {"id": 1}}
+    paginator = FakePaginator(
+        [
+            {"id": None, "numAttendees": 100, "isOnline": False, "events": [melee_event(9)]},
+            tournament(1, events=[no_id_event, melee_event(10)]),
+        ],
+        sets_by_event={9: [{"id": 90}], 10: [{"id": 100}]},
+    )
+    stats, publisher = run(paginator)
+    assert [key for _, key, _ in publisher.on(TOURNAMENTS_TOPIC)] == ["1"]
+    assert [key for _, key, _ in publisher.on(SETS_TOPIC)] == ["100"]
+    assert all(envelope["entity_id"] != "None" for _, _, envelope in publisher.messages)
+    assert (stats.tournaments, stats.events, stats.sets) == (1, 1, 1)

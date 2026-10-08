@@ -1,6 +1,7 @@
 """Idempotent JSON publisher for Kafka."""
 
 import json
+import time
 from collections.abc import Callable
 
 from confluent_kafka import Producer
@@ -19,11 +20,17 @@ class DeliveryError(RuntimeError):
 
 class KafkaPublisher:
     def __init__(
-        self, bootstrap_servers: str, producer_factory: Callable[[dict], Producer] = Producer
+        self,
+        bootstrap_servers: str,
+        producer_factory: Callable[[dict], Producer] = Producer,
+        buffer_timeout: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self._producer = producer_factory(
             {"bootstrap.servers": bootstrap_servers, **PRODUCER_CONFIG}
         )
+        self._buffer_timeout = buffer_timeout
+        self._clock = clock
         self._failures: list[str] = []
         self.published = 0
 
@@ -33,6 +40,7 @@ class KafkaPublisher:
 
     def publish(self, topic: str, key: str, value: dict) -> None:
         data = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        deadline = self._clock() + self._buffer_timeout
         while True:
             try:
                 self._producer.produce(
@@ -40,6 +48,12 @@ class KafkaPublisher:
                 )
                 break
             except BufferError:
+                if self._clock() >= deadline:
+                    # The payload is left out of the message on purpose.
+                    raise DeliveryError(
+                        f"local producer queue stayed full for {self._buffer_timeout:.0f}s "
+                        f"publishing to {topic}"
+                    ) from None
                 # Local queue is full: serve delivery callbacks to drain it, then retry.
                 self._producer.poll(1.0)
         self._producer.poll(0)

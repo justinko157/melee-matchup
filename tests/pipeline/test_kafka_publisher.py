@@ -43,14 +43,15 @@ class FakeProducer:
         return self._remaining
 
 
-def make(**kwargs):
+def make(publisher_kwargs=None, **kwargs):
     holder = {}
 
     def factory(config):
         holder["producer"] = FakeProducer(config, **kwargs)
         return holder["producer"]
 
-    return KafkaPublisher("kafka:9092", producer_factory=factory), holder
+    publisher = KafkaPublisher("kafka:9092", producer_factory=factory, **(publisher_kwargs or {}))
+    return publisher, holder
 
 
 def test_producer_is_idempotent_with_acks_all():
@@ -96,3 +97,20 @@ def test_flush_raises_when_messages_remain():
     publisher.publish("t", "1", {})
     with pytest.raises(DeliveryError, match="3 messages undelivered"):
         publisher.flush()
+
+
+def test_publish_gives_up_when_queue_stays_full_past_buffer_timeout():
+    now = [0.0]
+
+    def clock():
+        now[0] += 1.0
+        return now[0]
+
+    publisher, holder = make({"buffer_timeout": 5.0, "clock": clock}, buffer_full_times=10**9)
+    with pytest.raises(DeliveryError) as info:
+        publisher.publish("t", "1", {"secret_payload": "do-not-log"})
+    assert "do-not-log" not in str(info.value)
+    assert "t" in str(info.value)
+    assert holder["producer"].produced == []
+    assert 1 <= len(holder["producer"].polls) <= 6
+    assert publisher.published == 0

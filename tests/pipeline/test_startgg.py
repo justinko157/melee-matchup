@@ -1,8 +1,11 @@
+import logging
+
 import pytest
 import requests
 
 from pipeline.ingest.startgg import (
     MAX_ATTEMPTS,
+    MIN_PAGE_SIZE,
     ComplexityError,
     GraphQLError,
     InvalidTokenError,
@@ -21,10 +24,11 @@ PAGED_QUERY = "query EventSets($eventId: ID!, $page: Int!, $perPage: Int!) { x }
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, body=None, text=""):
+    def __init__(self, status_code=200, body=None, text="", headers=None):
         self.status_code = status_code
         self._body = body
         self.text = text
+        self.headers = headers or {}
 
     def json(self):
         return self._body
@@ -307,3 +311,90 @@ def test_malformed_2xx_exhausts_retries_without_token(response):
     assert len(session.calls) == MAX_ATTEMPTS
     assert TOKEN not in str(info.value)
     assert TOKEN not in repr(info.value)
+
+
+def test_transport_error_text_is_scrubbed_from_logs_and_exception(caplog):
+    error = requests.exceptions.ConnectionError(f"connection reset, header Bearer {TOKEN}")
+    client, _, _ = make_client(*[error] * MAX_ATTEMPTS)
+    with caplog.at_level(logging.WARNING, logger="pipeline.ingest.startgg"):
+        with pytest.raises(RetriesExhaustedError) as info:
+            client.query(QUERY, {})
+    assert caplog.records
+    for record in caplog.records:
+        assert TOKEN not in record.getMessage()
+    assert "[REDACTED]" in str(info.value)
+    assert TOKEN not in str(info.value)
+    assert TOKEN not in repr(info.value)
+
+
+def test_long_transport_error_text_is_truncated():
+    error = requests.exceptions.ConnectionError("z" * 2000)
+    client, _, _ = make_client(*[error] * MAX_ATTEMPTS)
+    with pytest.raises(RetriesExhaustedError) as info:
+        client.query(QUERY, {})
+    assert len(str(info.value)) <= 600
+
+
+def test_non_dict_json_2xx_is_retried():
+    client, session, sleeps = make_client(FakeResponse(200, [1, 2]), ok({"event": None}))
+    assert client.query(QUERY, {}) == {"event": None}
+    assert len(session.calls) == 2
+    assert sleeps == [2.0]
+
+
+def test_non_dict_json_2xx_exhausts_retries():
+    client, session, _ = make_client(*[FakeResponse(200, [TOKEN])] * MAX_ATTEMPTS)
+    with pytest.raises(RetriesExhaustedError, match="EventSets") as info:
+        client.query(QUERY, {})
+    assert len(session.calls) == MAX_ATTEMPTS
+    assert TOKEN not in str(info.value)
+
+
+@pytest.mark.parametrize(
+    ("status", "retry_after", "expected"),
+    [
+        (429, "10", 10.0),  # longer than the 2s backoff
+        (503, "1", 2.0),  # shorter than the backoff, backoff wins
+        (429, "600", 60.0),  # capped
+        (429, "soon", 2.0),  # unparseable, ignored
+        (503, "-5", 2.0),  # negative, backoff wins
+    ],
+)
+def test_retry_after_is_honored(status, retry_after, expected):
+    client, _, sleeps = make_client(
+        FakeResponse(status, headers={"Retry-After": retry_after}), ok({"event": None})
+    )
+    assert client.query(QUERY, {}) == {"event": None}
+    assert sleeps == [expected]
+
+
+def test_retry_after_does_not_carry_over_to_later_attempts():
+    client, _, sleeps = make_client(
+        FakeResponse(429, headers={"Retry-After": "30"}),
+        FakeResponse(502),
+        ok({"event": None}),
+    )
+    assert client.query(QUERY, {}) == {"event": None}
+    assert sleeps == [30.0, 4.0]
+
+
+def test_paginate_reraises_complexity_at_min_page_size():
+    complexity = FakeResponse(200, {"errors": [{"message": "query complexity is too high"}]})
+    client, session, _ = make_client(complexity, complexity)
+    with pytest.raises(ComplexityError):
+        client.paginate(
+            PAGED_QUERY, {"eventId": 5, "perPage": MIN_PAGE_SIZE * 2}, ["event", "sets"]
+        )
+    assert [c["variables"]["perPage"] for c in session.calls] == [MIN_PAGE_SIZE * 2, MIN_PAGE_SIZE]
+
+
+def test_operation_name_of_anonymous_query_falls_back():
+    assert operation_name("{ event(id: 1) { id } }") == "anonymous"
+    assert operation_name("query { event(id: 1) { id } }") == "anonymous"
+
+
+def test_anonymous_query_retries_and_exhausts_without_raising_value_error():
+    client, session, _ = make_client(*[FakeResponse(503)] * MAX_ATTEMPTS)
+    with pytest.raises(RetriesExhaustedError, match="anonymous"):
+        client.query("{ event(id: 1) { id } }", {})
+    assert len(session.calls) == MAX_ATTEMPTS

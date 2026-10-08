@@ -64,7 +64,35 @@ def test_dlq_envelope_has_error_fields_and_null_payload():
         ingested_at=datetime(2025, 1, 6, tzinfo=UTC),
         **COMMON,
     )
+    assert env == {
+        "entity": "event",
+        "entity_id": "10",
+        "ingested_at": "2025-01-06T00:00:00+00:00",
+        "dagster_run_id": "run-1",
+        "partition_week": "2025-01-06",
+        "query_name": "EventSets",
+        "query_variables": {"eventId": 10},
+        "payload": None,
+        "error_type": "TimeoutError",
+        "error_message": "took too long",
+    }
     assert env["payload"] is None
-    assert env["entity"] == "event"
-    assert env["error_type"] == "TimeoutError"
-    assert env["error_message"] == "took too long"
+
+
+def test_none_entity_id_is_rejected():
+    with pytest.raises(ValueError, match="entity_id"):
+        build_envelope(
+            entity="set",
+            entity_id=None,
+            payload={},
+            ingested_at=datetime(2025, 1, 6, tzinfo=UTC),
+            **COMMON,
+        )
+    with pytest.raises(ValueError, match="entity_id"):
+        build_dlq_envelope(
+            entity="event",
+            entity_id=None,
+            error=TimeoutError("x"),
+            ingested_at=datetime(2025, 1, 6, tzinfo=UTC),
+            **COMMON,
+        )

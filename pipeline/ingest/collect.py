@@ -82,6 +82,9 @@ def collect_week(
     for tournament in tournaments:
         if not is_eligible_tournament(tournament, min_attendees):
             continue
+        if tournament.get("id") is None:
+            logger.warning("Skipping tournament without an id: %s", tournament.get("name"))
+            continue
         publisher.publish(
             TOURNAMENTS_TOPIC,
             str(tournament["id"]),
@@ -98,6 +101,9 @@ def collect_week(
         stats.tournaments += 1
 
         for event in melee_events(tournament):
+            if event.get("id") is None:
+                logger.warning("Skipping event without an id in tournament %s", tournament["id"])
+                continue
             stats.events += 1
             set_vars = {"eventId": event["id"], "perPage": SETS_PER_PAGE}
             try:
