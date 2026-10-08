@@ -1,9 +1,9 @@
 SHELL := bash
-.PHONY: install collect features validate train tune export app test lint docker-build docker-run clean up down nuke ps logs check-lakehouse test-spark bronze-once smoke
+.PHONY: install collect features validate train tune export app test lint format docker-build docker-run clean up down nuke ps logs check-lakehouse test-spark bronze-once smoke
 
 # ── Setup ──────────────────────────────────────────────
 install:
-	pip install -e ".[dev,ml,app]"
+	uv sync --all-extras
 
 # ── Local stack ────────────────────────────────────────
 COMPOSE := docker compose -f infra/docker-compose.yml --env-file .env
@@ -41,37 +41,37 @@ bronze-once:
 
 # ── Data Pipeline ──────────────────────────────────────
 collect:
-	python -m src.collect --start-date 2018-01-01 --min-attendees 50
+	uv run python -m src.collect --start-date 2018-01-01 --min-attendees 50
 
 features:
-	python -m src.features
+	uv run python -m src.features
 
 validate:
-	python -m src.validation
+	uv run python -m src.validation
 
 # ── Modeling ───────────────────────────────────────────
 train:
-	python -m src.model
+	uv run python -m src.model
 
 tune:
-	python -m src.tuning --n-trials 50
+	uv run python -m src.tuning --n-trials 50
 
 export:
-	python -m src.export_app_data
+	uv run python -m src.export_app_data
 
 # ── App ────────────────────────────────────────────────
 app:
-	streamlit run app.py
+	uv run streamlit run app.py
 
 # ── Quality ────────────────────────────────────────────
 test:
-	pytest tests/ -v
+	uv run pytest -v
 
 lint:
-	ruff check src/ tests/ app.py
+	uv run ruff check src/ tests/ app.py pipeline/ scripts/
 
 format:
-	ruff format src/ tests/ app.py
+	uv run ruff format src/ tests/ app.py pipeline/ scripts/
 
 # ── Docker ─────────────────────────────────────────────
 docker-build:

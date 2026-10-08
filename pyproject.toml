@@ -53,6 +53,9 @@ select = ["E", "F", "I", "W"]
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-m 'not spark'"
+filterwarnings = [
+    'ignore:datetime.datetime.utcfromtimestamp\(\) is deprecated:DeprecationWarning:dagster.*',
+]
 markers = [
     "spark: needs a local SparkSession (Java). Run with `make test-spark`.",
 ]
