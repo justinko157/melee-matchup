@@ -71,7 +71,7 @@ lint:
 	uv run ruff check src/ tests/ app.py pipeline/ scripts/
 
 format:
-	uv run ruff format src/ tests/ app.py pipeline/ scripts/
+	uv run ruff format pipeline tests/pipeline tests/smoke scripts
 
 # ── Docker ─────────────────────────────────────────────
 docker-build:

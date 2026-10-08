@@ -7,6 +7,7 @@ on:
 
 jobs:
   lint-and-unit:
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +24,7 @@ jobs:
         run: uv run dagster definitions validate -m pipeline.dagster_defs
 
   spark-and-smoke:
+    timeout-minutes: 45
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
