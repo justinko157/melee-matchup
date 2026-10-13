@@ -76,3 +76,9 @@ def test_sql_catalog_round_trip(sql_catalog):
     assert sorted(frame["id"].tolist()) == [1, 2]
     assert list(frame.columns) == ["id"]
     assert current_snapshot_id(sql_catalog, "demo.t") is not None
+
+
+def test_settings_repr_hides_the_secret_key():
+    settings = LakehouseSettings(s3_access_key="k", s3_secret_key="secret-value")
+    assert "secret-value" not in repr(settings)
+    assert "secret-value" not in str(settings)

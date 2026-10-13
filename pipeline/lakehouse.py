@@ -2,7 +2,7 @@
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 from pyiceberg.catalog import Catalog, load_catalog
@@ -22,7 +22,7 @@ class LakehouseSettings:
     warehouse: str = "melee"
     s3_endpoint: str | None = None
     s3_access_key: str | None = None
-    s3_secret_key: str | None = None
+    s3_secret_key: str | None = field(default=None, repr=False)
     s3_region: str = "local-01"
 
     @classmethod
