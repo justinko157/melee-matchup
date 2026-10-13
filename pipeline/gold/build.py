@@ -28,9 +28,15 @@ SET_COLUMNS = (
 )
 
 
+Checks = dict[str, tuple[bool, dict]]
+
+
 @dataclass
 class GoldBuild:
-    frames: dict[str, pd.DataFrame]
+    """What a build wrote. Holds only scalars: the frames are released as they are written."""
+
+    row_counts: dict[str, int]
+    checks: Checks
     eligible_silver_sets: int
     silver_sets_snapshot: int | None
     snapshots: dict[str, int | None]
@@ -43,6 +49,8 @@ def load_silver(catalog: Catalog) -> tuple[pd.DataFrame, pd.DataFrame, int | Non
     the original SQL. The eligible count is taken before the join, so a gap shows
     up in the features_match_silver check.
     """
+    # Pin and read silver.sets before its parents on purpose: the silver job MERGEs
+    # parents first, so parents read afterwards are at least as new as the sets.
     snapshot = current_snapshot_id(catalog, "silver.sets")
     sets = read_table(catalog, "silver.sets", SET_COLUMNS, snapshot_id=snapshot)
     events = read_table(catalog, "silver.events", ("event_id", "tournament_id"))
@@ -57,36 +65,44 @@ def load_silver(catalog: Catalog) -> tuple[pd.DataFrame, pd.DataFrame, int | Non
     return joined, players, snapshot, eligible
 
 
-def build_gold(catalog: Catalog) -> GoldBuild:
-    sets, players, snapshot, eligible = load_silver(catalog)
-    features, state = build_features(sets)
-    frames = {
-        SET_FEATURES: features,
-        PLAYER_RATINGS: player_ratings(state, players),
-        HEAD_TO_HEAD: head_to_head(state),
-    }
-    snapshots = write_gold(catalog, frames, snapshot)
-    return GoldBuild(frames, eligible, snapshot, snapshots)
-
-
-def gold_checks(build: GoldBuild) -> dict[str, tuple[bool, dict]]:
-    features = build.frames[SET_FEATURES]
+def feature_checks(features: pd.DataFrame, eligible_silver_sets: int) -> Checks:
     nulls = int(features[CORE_FEATURES].isna().sum().sum())
     ordered = bool(features["completed_at"].is_monotonic_increasing)
     return {
         "features_match_silver": (
-            len(features) == build.eligible_silver_sets,
-            {"gold_rows": len(features), "eligible_silver_sets": build.eligible_silver_sets},
+            len(features) == eligible_silver_sets,
+            {"gold_rows": len(features), "eligible_silver_sets": eligible_silver_sets},
         ),
         "no_null_features": (nulls == 0, {"null_feature_values": nulls}),
         "completed_at_non_decreasing": (ordered, {}),
     }
 
 
+def build_gold(catalog: Catalog) -> GoldBuild:
+    sets, players, snapshot, eligible = load_silver(catalog)
+    features, state = build_features(sets)
+    del sets
+    checks = feature_checks(features, eligible)
+    frames = {
+        SET_FEATURES: features,
+        PLAYER_RATINGS: player_ratings(state, players),
+        HEAD_TO_HEAD: head_to_head(state),
+    }
+    del features, state, players
+    row_counts = {identifier: len(frame) for identifier, frame in frames.items()}
+    snapshots = write_gold(catalog, frames, snapshot)  # consumes frames
+    return GoldBuild(row_counts, checks, eligible, snapshot, snapshots)
+
+
+def gold_checks(build: GoldBuild) -> Checks:
+    """Check results, computed from set_features before it was written and released."""
+    return build.checks
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     build = build_gold(load_lakehouse_catalog())
-    summary = {name: len(frame) for name, frame in build.frames.items()}
+    summary: dict = dict(build.row_counts)
     summary["checks"] = {name: passed for name, (passed, _) in gold_checks(build).items()}
     print(json.dumps(summary))
 

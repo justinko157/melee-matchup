@@ -43,11 +43,19 @@ def replace_table(
 def write_gold(
     catalog: Catalog, frames: dict[str, pd.DataFrame], silver_sets_snapshot: int | None
 ) -> dict[str, int | None]:
+    """Replace every gold table, consuming ``frames``.
+
+    Each frame is popped from the dict and released once it is converted to Arrow,
+    and set_features (the large one) goes first, so it is gone before the small
+    tables are converted. Callers must not hold their own references to the frames.
+    """
     snapshot = "" if silver_sets_snapshot is None else str(silver_sets_snapshot)
     properties = {SILVER_SNAPSHOT_PROPERTY: snapshot}
-    return {
-        identifier: replace_table(
-            catalog, identifier, to_arrow(frames[identifier], schema), properties
-        )
-        for identifier, (schema, _) in GOLD_TABLES.items()
-    }
+    snapshots: dict[str, int | None] = {}
+    for identifier, (schema, _) in GOLD_TABLES.items():
+        frame = frames.pop(identifier)
+        data = to_arrow(frame, schema)
+        del frame
+        snapshots[identifier] = replace_table(catalog, identifier, data, properties)
+        del data
+    return snapshots

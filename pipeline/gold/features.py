@@ -5,9 +5,10 @@ in (completed_at, set_id) order so ties resolve the same way on every run.
 """
 
 import math
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 
+import numpy as np
 import pandas as pd
 
 DEFAULT_ELO = 1500
@@ -107,7 +108,10 @@ class FeatureState:
     """Everything the pass knows after the last set; gold's player and h2h tables use it."""
 
     elo: EloEngine = field(default_factory=EloEngine)
-    recent_wins: dict[int, list[bool]] = field(default_factory=lambda: defaultdict(list))
+    # Only the last RECENT_WINDOW results matter, so older ones are dropped.
+    recent_wins: dict[int, deque[bool]] = field(
+        default_factory=lambda: defaultdict(lambda: deque(maxlen=RECENT_WINDOW))
+    )
     # (lower id, higher id) -> [lower id's wins, higher id's wins]
     h2h: dict[tuple[int, int], list[int]] = field(
         default_factory=lambda: defaultdict(lambda: [0, 0])
@@ -116,14 +120,6 @@ class FeatureState:
     losses: dict[int, int] = field(default_factory=lambda: defaultdict(int))
     last_played: dict[int, pd.Timestamp] = field(default_factory=dict)
     pair_last_played: dict[tuple[int, int], pd.Timestamp] = field(default_factory=dict)
-
-
-def _int_or_none(value) -> int | None:
-    return None if value is None or pd.isna(value) else int(value)
-
-
-def _float_or_none(value) -> float | None:
-    return None if value is None or pd.isna(value) else float(value)
 
 
 def eligible_sets(sets: pd.DataFrame) -> pd.DataFrame:
@@ -180,77 +176,95 @@ def _typed(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_features(sets: pd.DataFrame) -> tuple[pd.DataFrame, FeatureState]:
-    """Build the feature matrix (FEATURE_COLUMNS) and return the final state."""
+    """Build the feature matrix (FEATURE_COLUMNS) and return the final state.
+
+    Per-set values go into preallocated arrays rather than a list of row dicts,
+    which kept ~2 KB of Python objects alive per set until the frame was built,
+    and the frame wraps those arrays without copying them.
+    """
     state = FeatureState()
-    rows = []
-    for row in eligible_sets(sets).itertuples(index=False):
-        p1, p2 = int(row.player1_id), int(row.player2_id)
-        winner = int(row.winner_player_id)
+    ordered = eligible_sets(sets)
+    n = len(ordered)
+    p1_elo, p2_elo, p1_expected = np.empty(n), np.empty(n), np.empty(n)
+    p1_recent_wr, p2_recent_wr, p1_h2h_wr = np.empty(n), np.empty(n), np.empty(n)
+    p1_sets_played, p2_sets_played = np.empty(n, "int64"), np.empty(n, "int64")
+    p1_h2h_wins, p2_h2h_wins = np.empty(n, "int64"), np.empty(n, "int64")
+    p1_won = np.empty(n, "int64")
+
+    p1_ids = ordered["player1_id"].astype("int64").to_numpy()
+    p2_ids = ordered["player2_id"].astype("int64").to_numpy()
+    winners = ordered["winner_player_id"].astype("int64").to_numpy()
+    for i, completed_at in enumerate(ordered["completed_at"]):
+        p1, p2, winner = int(p1_ids[i]), int(p2_ids[i]), int(winners[i])
 
         # --- FEATURES (computed BEFORE this set) ---
-        p1_elo = state.elo.get_rating(p1)
-        p2_elo = state.elo.get_rating(p2)
-        p1_games = state.elo.games_played[p1]
-        p2_games = state.elo.games_played[p2]
+        elo1, elo2 = state.elo.get_rating(p1), state.elo.get_rating(p2)
+        p1_elo[i], p2_elo[i] = elo1, elo2
+        p1_expected[i] = state.elo.expected_score(elo1, elo2)
+        p1_sets_played[i] = state.elo.games_played[p1]
+        p2_sets_played[i] = state.elo.games_played[p2]
 
-        p1_recent = state.recent_wins[p1][-RECENT_WINDOW:]
-        p2_recent = state.recent_wins[p2][-RECENT_WINDOW:]
-        p1_recent_wr = sum(p1_recent) / len(p1_recent) if p1_recent else 0.5
-        p2_recent_wr = sum(p2_recent) / len(p2_recent) if p2_recent else 0.5
+        p1_recent, p2_recent = state.recent_wins[p1], state.recent_wins[p2]
+        p1_recent_wr[i] = sum(p1_recent) / len(p1_recent) if p1_recent else 0.5
+        p2_recent_wr[i] = sum(p2_recent) / len(p2_recent) if p2_recent else 0.5
 
         pair = (min(p1, p2), max(p1, p2))
         record = state.h2h[pair]
         if p1 == pair[0]:
-            p1_h2h_wins, p2_h2h_wins = record[0], record[1]
+            wins1, wins2 = record[0], record[1]
         else:
-            p1_h2h_wins, p2_h2h_wins = record[1], record[0]
-        h2h_total = p1_h2h_wins + p2_h2h_wins
+            wins1, wins2 = record[1], record[0]
+        p1_h2h_wins[i], p2_h2h_wins[i] = wins1, wins2
+        p1_h2h_wr[i] = wins1 / (wins1 + wins2) if wins1 + wins2 > 0 else 0.5
 
-        p1_seed, p2_seed = _int_or_none(row.player1_seed), _int_or_none(row.player2_seed)
-        p1_won = int(winner == p1)
-
-        rows.append(
-            {
-                "set_id": int(row.set_id),
-                "event_id": int(row.event_id),
-                "tournament_id": int(row.tournament_id),
-                "tournament_name": row.tournament_name,
-                "completed_at": row.completed_at,
-                "player1_id": p1,
-                "player2_id": p2,
-                "p1_elo": p1_elo,
-                "p2_elo": p2_elo,
-                "elo_diff": p1_elo - p2_elo,
-                "p1_expected": state.elo.expected_score(p1_elo, p2_elo),
-                "p1_sets_played": p1_games,
-                "p2_sets_played": p2_games,
-                "p1_recent_wr": p1_recent_wr,
-                "p2_recent_wr": p2_recent_wr,
-                "recent_wr_diff": p1_recent_wr - p2_recent_wr,
-                "p1_h2h_wins": p1_h2h_wins,
-                "p2_h2h_wins": p2_h2h_wins,
-                "p1_h2h_wr": p1_h2h_wins / h2h_total if h2h_total > 0 else 0.5,
-                "h2h_total": h2h_total,
-                "p1_seed": p1_seed,
-                "p2_seed": p2_seed,
-                # A missing seed counts as 0, as in the original pipeline.
-                "seed_diff": (p1_seed or 0) - (p2_seed or 0),
-                "num_attendees": _int_or_none(row.num_attendees) or 0,
-                "p1_score": _float_or_none(row.player1_score),
-                "p2_score": _float_or_none(row.player2_score),
-                "p1_won": p1_won,
-            }
-        )
+        won = winner == p1
+        p1_won[i] = int(won)
 
         # --- UPDATE STATE (after this set) ---
-        loser = p2 if winner == p1 else p1
+        loser = p2 if won else p1
         state.elo.update(winner, loser)
-        state.recent_wins[p1].append(p1_won == 1)
-        state.recent_wins[p2].append(p1_won == 0)
+        state.recent_wins[p1].append(won)
+        state.recent_wins[p2].append(not won)
         state.h2h[pair][0 if winner == pair[0] else 1] += 1
         state.wins[winner] += 1
         state.losses[loser] += 1
-        state.last_played[p1] = state.last_played[p2] = row.completed_at
-        state.pair_last_played[pair] = row.completed_at
+        state.last_played[p1] = state.last_played[p2] = completed_at
+        state.pair_last_played[pair] = completed_at
 
-    return _typed(pd.DataFrame(rows, columns=list(FEATURE_COLUMNS))), state
+    p1_seed = ordered["player1_seed"].astype("Int64")
+    p2_seed = ordered["player2_seed"].astype("Int64")
+    frame = pd.DataFrame(
+        {
+            "set_id": ordered["set_id"].to_numpy(),
+            "event_id": ordered["event_id"].to_numpy(),
+            "tournament_id": ordered["tournament_id"].to_numpy(),
+            "tournament_name": ordered["tournament_name"].to_numpy(),
+            "completed_at": ordered["completed_at"],
+            "player1_id": p1_ids,
+            "player2_id": p2_ids,
+            "p1_elo": p1_elo,
+            "p2_elo": p2_elo,
+            "elo_diff": p1_elo - p2_elo,
+            "p1_expected": p1_expected,
+            "p1_sets_played": p1_sets_played,
+            "p2_sets_played": p2_sets_played,
+            "p1_recent_wr": p1_recent_wr,
+            "p2_recent_wr": p2_recent_wr,
+            "recent_wr_diff": p1_recent_wr - p2_recent_wr,
+            "p1_h2h_wins": p1_h2h_wins,
+            "p2_h2h_wins": p2_h2h_wins,
+            "p1_h2h_wr": p1_h2h_wr,
+            "h2h_total": p1_h2h_wins + p2_h2h_wins,
+            "p1_seed": p1_seed,
+            "p2_seed": p2_seed,
+            # A missing seed counts as 0, as in the original pipeline.
+            "seed_diff": (p1_seed.fillna(0) - p2_seed.fillna(0)).to_numpy("int64"),
+            "num_attendees": ordered["num_attendees"].fillna(0).to_numpy(),
+            "p1_score": ordered["player1_score"].to_numpy(),
+            "p2_score": ordered["player2_score"].to_numpy(),
+            "p1_won": p1_won,
+        },
+        columns=list(FEATURE_COLUMNS),
+        copy=False,  # wrap the arrays instead of copying them into new blocks
+    )
+    return _typed(frame), state

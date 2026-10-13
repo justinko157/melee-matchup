@@ -168,3 +168,22 @@ def test_empty_input_yields_a_schema_valid_empty_frame():
     assert len(features) == 0
     assert tuple(features.columns) == FEATURE_COLUMNS
     features_schema.validate(features)
+
+
+def test_recent_window_keeps_only_the_last_30_results():
+    # Alice loses 10 sets, then wins 30: only the 30 wins are in her window.
+    rows = [
+        {
+            "set_id": i,
+            "completed_at": 1000000 + i,
+            "player1_id": 100,
+            "player2_id": 200,
+            "winner_player_id": 200 if i < 10 else 100,
+        }
+        for i in range(40)
+    ]
+    features, state = build_features(sets_frame(rows))
+    assert len(state.recent_wins[100]) == 30
+    assert list(state.recent_wins[100]) == [True] * 30
+    # Before the last set her window is sets 9-38: one loss, then 29 wins.
+    assert features["p1_recent_wr"].iloc[-1] == 29 / 30
