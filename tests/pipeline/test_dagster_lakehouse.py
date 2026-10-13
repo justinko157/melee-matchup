@@ -97,6 +97,11 @@ def test_silver_job_command_and_environment(monkeypatch):
         "/checkpoints/silver",
     ]
     assert "STARTGG_API_TOKEN" not in kwargs["env"]
+    # A full silver rebuild over 2018 onward takes hours; bronze keeps its 1-hour timeout.
+    assert kwargs["timeout"] == 14400
+    calls.clear()
+    SparkJobResource(silver_timeout_seconds=60, timeout_seconds=5).run_silver_job()
+    assert calls[0][1]["timeout"] == 60
 
 
 def test_gold_asset_builds_tables_and_reports_checks(sql_settings, sql_catalog):

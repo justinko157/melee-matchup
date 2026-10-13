@@ -84,7 +84,8 @@ class SparkJobResource(dg.ConfigurableResource):
     bootstrap_servers: str = "kafka:9092"
     checkpoint_root: str = "/checkpoints/bronze"
     silver_lock_dir: str = "/checkpoints/silver"
-    timeout_seconds: int = 3600
+    timeout_seconds: int = 3600  # bronze
+    silver_timeout_seconds: int = 14400
     maintenance_timeout_seconds: int = 7200
 
     def _submit(self, job: str, command: list[str], timeout: int) -> str:
@@ -113,7 +114,7 @@ class SparkJobResource(dg.ConfigurableResource):
 
     def run_silver_job(self) -> dict:
         command = ["spark-submit", self.silver_job_path, "--lock-dir", self.silver_lock_dir]
-        return parse_silver_summary(self._submit("Silver", command, self.timeout_seconds))
+        return parse_silver_summary(self._submit("Silver", command, self.silver_timeout_seconds))
 
     def run_maintenance_job(self) -> dict:
         command = ["spark-submit", self.maintenance_job_path]
