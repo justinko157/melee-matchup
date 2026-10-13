@@ -20,12 +20,13 @@ from pipeline.dagster_defs.resources import (
     StartGGResource,
     lakehouse_from_env,
 )
+from pipeline.dagster_defs.training import daily_training, matchup_model, train_job
 
 defs = dg.Definitions(
-    assets=[startgg_raw, bronze_startgg, silver_startgg, gold_startgg],
-    jobs=[ingest_job, bronze_job],
+    assets=[startgg_raw, bronze_startgg, silver_startgg, gold_startgg, matchup_model],
+    jobs=[ingest_job, bronze_job, train_job],
     sensors=[land_bronze_after_ingest, lakehouse_automation],
-    schedules=[refresh_recent_weeks],
+    schedules=[refresh_recent_weeks, daily_training],
     resources={
         # EnvVar keeps the token out of the config Dagster shows in the UI.
         "startgg": StartGGResource(
