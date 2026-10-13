@@ -13,6 +13,7 @@ from pipeline.dagster_defs.automation import (
     refresh_recent_weeks,
 )
 from pipeline.dagster_defs.lakehouse_assets import gold_startgg, silver_startgg
+from pipeline.dagster_defs.maintenance import lakehouse_maintenance, weekly_maintenance
 from pipeline.dagster_defs.resources import (
     KafkaResource,
     MlflowResource,
@@ -24,9 +25,9 @@ from pipeline.dagster_defs.training import daily_training, matchup_model, train_
 
 defs = dg.Definitions(
     assets=[startgg_raw, bronze_startgg, silver_startgg, gold_startgg, matchup_model],
-    jobs=[ingest_job, bronze_job, train_job],
+    jobs=[ingest_job, bronze_job, train_job, lakehouse_maintenance],
     sensors=[land_bronze_after_ingest, lakehouse_automation],
-    schedules=[refresh_recent_weeks, daily_training],
+    schedules=[refresh_recent_weeks, daily_training, weekly_maintenance],
     resources={
         # EnvVar keeps the token out of the config Dagster shows in the UI.
         "startgg": StartGGResource(

@@ -156,20 +156,50 @@ def test_expired_watermark_falls_back_to_full_scan(lakehouse):
     assert count(lakehouse, "sets") == 3
 
 
+def compact_bronze_sets(spark):
+    """Rewrite bronze sets' data files; returns the operation of the resulting main snapshot."""
+    spark.sql(
+        f"CALL local.system.rewrite_data_files(table => '{BRONZE_SETS}', "
+        f"options => map('min-input-files', '1'))"
+    ).collect()
+    return current_snapshot(spark).operation
+
+
+def current_snapshot(spark):
+    return spark.sql(
+        f"SELECT s.snapshot_id, s.operation FROM {BRONZE_SETS}.snapshots s "
+        f"JOIN {BRONZE_SETS}.refs r ON r.snapshot_id = s.snapshot_id WHERE r.name = 'main'"
+    ).first()
+
+
 def test_compaction_snapshot_does_not_force_a_full_scan(lakehouse):
     create_bronze(lakehouse)
     append(lakehouse, BRONZE_TOURNAMENTS, "tournament", tournament(), {}, T0)
     append(lakehouse, BRONZE_SETS, "set", a_set(100), {"eventId": 70}, T0)
     run_silver(lakehouse)
-    append(lakehouse, BRONZE_SETS, "set", a_set(101), {"eventId": 70}, T1)
-    lakehouse.sql(
-        f"CALL local.system.rewrite_data_files(table => '{BRONZE_SETS}', "
-        f"options => map('min-input-files', '1'))"
-    ).collect()
+    # Same day as set 100, so both files share a days(ingested_at) partition and get compacted.
+    append(lakehouse, BRONZE_SETS, "set", a_set(101), {"eventId": 70}, T0)
+    assert compact_bronze_sets(lakehouse) == "replace"
     append(lakehouse, BRONZE_SETS, "set", a_set(102), {"eventId": 70}, T1)
     summary = run_silver(lakehouse)
     assert summary["bronze_rows_read"] == 2  # the two appends after the watermark
     assert count(lakehouse, "sets") == 3
+
+
+def test_compaction_as_newest_snapshot_reads_nothing_and_advances_watermark(lakehouse):
+    create_bronze(lakehouse)
+    append(lakehouse, BRONZE_TOURNAMENTS, "tournament", tournament(), {}, T0)
+    append(lakehouse, BRONZE_SETS, "set", a_set(100), {"eventId": 70}, T0)
+    append(lakehouse, BRONZE_SETS, "set", a_set(101), {"eventId": 70}, T0)
+    run_silver(lakehouse)
+    assert compact_bronze_sets(lakehouse) == "replace"  # no appends after the compaction
+    summary = run_silver(lakehouse)
+    assert summary["bronze_rows_read"] == 0
+    assert all(v == {"inserted": 0, "updated": 0} for v in summary["tables"].values())
+    watermarks = {
+        r.bronze_table: r.snapshot_id for r in lakehouse.table(WATERMARKS_TABLE).collect()
+    }
+    assert watermarks[BRONZE_SETS] == current_snapshot(lakehouse).snapshot_id
 
 
 def test_orphan_sets_are_counted(lakehouse):
