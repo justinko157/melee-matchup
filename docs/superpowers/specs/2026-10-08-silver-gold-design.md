@@ -109,7 +109,7 @@ Sets are processed in order of `(completed_at, set_id)`, so ties are broken the 
    - `WHEN MATCHED AND s.source_ingested_at >= t.source_ingested_at THEN UPDATE`
    - `WHEN NOT MATCHED THEN INSERT`
 6. Update the watermarks with one MERGE into `silver._watermarks`, after all table MERGEs have committed.
-7. Print a JSON summary as the last stdout line. It includes, per table, `{"inserted": n, "updated": n}` (from the MERGE snapshot summaries), plus `"dropped": {reason: n}` and `"bronze_rows_read": n`.
+7. Print a JSON summary as the last stdout line. It includes, per table, `{"inserted": n, "updated": n}`, plus `"dropped": {reason: n}` and `"bronze_rows_read": n`. The per-table counts come from a join against the target before the MERGE, not from the MERGE snapshot summaries, because copy-on-write summaries count every row in each rewritten file. `updated` counts every staged row whose bronze version is equal to or newer than the existing row's, so it includes same-value rewrites.
 
 **Crash safety.** If the job fails after some MERGEs but before the watermark update, the next run re-reads the same snapshots. The `>=` rule turns already-written rows into same-value updates. Nothing goes backward.
 
