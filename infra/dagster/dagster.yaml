@@ -13,8 +13,8 @@ storage:
 
 concurrency:
   pools:
-    # startgg_api: the API rate limit is shared, so one ingestion run at a time.
-    # spark_bronze: bronze runs share streaming checkpoints, so one at a time.
+    # Every pool runs one at a time: startgg_api (shared API rate limit),
+    # spark_lakehouse (one Spark driver; bronze checkpoints), gold, training.
     default_limit: 1
     granularity: run
 

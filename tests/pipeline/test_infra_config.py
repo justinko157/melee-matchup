@@ -4,6 +4,7 @@ import re
 import tomllib
 from pathlib import Path
 
+from pipeline.dagster_defs.pools import ALL_POOLS
 from pipeline.topics import ALL_TOPICS
 
 COMPOSE = Path("infra/docker-compose.yml").read_text(encoding="utf-8")
@@ -51,3 +52,34 @@ def test_makefile_env_file_is_optional():
 def test_pipeline_image_installs_the_ml_extra():
     dockerfile = Path("infra/pipeline.Dockerfile").read_text(encoding="utf-8")
     assert "--extra pipeline --extra ml --extra dev" in dockerfile
+
+
+def _service(name: str) -> str:
+    """The text of one top-level Compose service block (two-space indented key)."""
+    start = COMPOSE.index(f"\n  {name}:\n")
+    rest = COMPOSE[start + 1 :]
+    following = re.search(r"\n  [a-z][a-z0-9-]*:\n", rest[1:])
+    return rest if following is None else rest[: following.start() + 1]
+
+
+def test_mlflow_uses_postgres_silo_and_one_worker():
+    mlflow = _service("mlflow")
+    assert "ghcr.io/mlflow/mlflow:v3.16.1-full" in mlflow
+    assert "postgresql+psycopg2://" in mlflow and "@postgres:5432/mlflow" in mlflow
+    assert "s3://mlflow" in mlflow and "--serve-artifacts" in mlflow
+    assert '"1"' in mlflow.split("--workers", 1)[1].split("\n", 2)[1]
+    assert "mlflow:5000" in mlflow  # allowed Host header for in-network clients
+
+
+def test_mlflow_database_exists_on_new_and_existing_volumes():
+    init_sql = Path("infra/postgres/init-databases.sql").read_text(encoding="utf-8")
+    assert "CREATE DATABASE mlflow;" in init_sql
+    assert "mlflow" in _service("postgres-databases")
+    assert "local/mlflow" in _service("create-bucket")
+
+
+def test_dagster_pools_service_sets_every_pool():
+    pools = _service("dagster-pools")
+    for pool in ALL_POOLS:
+        assert f"concurrency set {pool} 1" in pools
+    assert "spark_bronze" not in pools
