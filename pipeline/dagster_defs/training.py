@@ -6,6 +6,7 @@ import pandas as pd
 from pipeline.dagster_defs.lakehouse_assets import gold_startgg
 from pipeline.dagster_defs.pools import SPARK_LAKEHOUSE
 from pipeline.dagster_defs.resources import LakehouseResource, MlflowResource
+from pipeline.dagster_defs.run_limits import TRAINING, max_runtime
 from pipeline.gold.tables import SET_FEATURES
 from pipeline.lakehouse import current_snapshot_id
 
@@ -71,7 +72,9 @@ def matchup_model(
     )
 
 
-train_job = dg.define_asset_job("train_matchup_model", selection=[matchup_model])
+train_job = dg.define_asset_job(
+    "train_matchup_model", selection=[matchup_model], tags=max_runtime(TRAINING)
+)
 
 
 def should_train(gold_snapshot: int | None, champion_snapshot: str | None) -> str | None:

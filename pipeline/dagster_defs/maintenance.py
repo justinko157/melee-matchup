@@ -4,6 +4,7 @@ import dagster as dg
 
 from pipeline.dagster_defs.pools import SPARK_LAKEHOUSE
 from pipeline.dagster_defs.resources import SparkJobResource
+from pipeline.dagster_defs.run_limits import MAINTENANCE, max_runtime
 
 
 def maintenance_totals(summary: dict) -> tuple[int, int]:
@@ -31,7 +32,7 @@ def run_lakehouse_maintenance(
     )
 
 
-@dg.job
+@dg.job(tags=max_runtime(MAINTENANCE))
 def lakehouse_maintenance():
     run_lakehouse_maintenance()
 

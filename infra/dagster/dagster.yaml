@@ -22,6 +22,10 @@ concurrency:
 run_monitoring:
   enabled: true
   free_slots_after_run_end_seconds: 300
+  # Fails a run that outlives its dagster/max_runtime tag (see
+  # pipeline/dagster_defs/run_limits.py), so a dead run worker frees its pool
+  # slot. Untagged runs (asset-page launches) get the longest limit.
+  max_runtime_seconds: 19800
 
 telemetry:
   enabled: false

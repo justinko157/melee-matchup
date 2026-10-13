@@ -78,3 +78,19 @@ def test_unreachable_webserver_exits_with_one_line(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "http://localhost:9/graphql" in err
     assert "Traceback" not in err
+
+
+def test_backfill_runs_carry_the_ingest_max_runtime(monkeypatch, capsys):
+    sent = []
+
+    def fake_urlopen(request, timeout):
+        sent.append(json.loads(request.data))
+        return FakeResponse(
+            {"data": {"launchPartitionBackfill": {"__typename": "LaunchBackfillSuccess"}}}
+        )
+
+    monkeypatch.setattr(dagster_ops.urllib.request, "urlopen", fake_urlopen)
+    dagster_ops.main(["backfill", "--start", "2025-01-06", "--end", "2025-01-13"])
+    params = sent[0]["variables"]["params"]
+    # Asset backfill runs don't get job tags; without this a dead worker holds startgg_api.
+    assert {"key": "dagster/max_runtime", "value": "1800"} in params["tags"]

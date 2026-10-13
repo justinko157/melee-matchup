@@ -21,6 +21,7 @@ from datetime import date, timedelta
 
 LOCATION = "melee"
 REPOSITORY = "__repository__"
+BACKFILL_MAX_RUNTIME = 1800  # pipeline.dagster_defs.run_limits.INGEST
 
 LAUNCH_RUN = """
 mutation($params: ExecutionParams!) {
@@ -125,6 +126,9 @@ def main(argv: list[str] | None = None) -> None:
             "assetSelection": [{"path": [args.asset]}],
             "partitionNames": keys,
             "title": f"{args.asset} {keys[0]}..{keys[-1]}",
+            # Asset backfill runs don't carry job tags: cap each week's run so a
+            # dead worker can't hold the startgg_api pool (see run_limits.py).
+            "tags": [{"key": "dagster/max_runtime", "value": str(BACKFILL_MAX_RUNTIME)}],
         }
         result = graphql(url, LAUNCH_BACKFILL, {"params": params})
         print(

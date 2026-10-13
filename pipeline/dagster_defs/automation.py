@@ -5,9 +5,14 @@ import dagster as dg
 from pipeline.dagster_defs.assets import bronze_startgg, startgg_raw
 from pipeline.dagster_defs.lakehouse_assets import gold_startgg, silver_startgg
 from pipeline.dagster_defs.partitions import WEEKLY_PARTITIONS
+from pipeline.dagster_defs.run_limits import BRONZE, INGEST, LAKEHOUSE, max_runtime
 
-ingest_job = dg.define_asset_job("ingest_startgg", selection=[startgg_raw])
-bronze_job = dg.define_asset_job("land_bronze", selection=[bronze_startgg])
+ingest_job = dg.define_asset_job(
+    "ingest_startgg", selection=[startgg_raw], tags=max_runtime(INGEST)
+)
+bronze_job = dg.define_asset_job(
+    "land_bronze", selection=[bronze_startgg], tags=max_runtime(BRONZE)
+)
 
 PENDING = [dg.DagsterRunStatus.QUEUED, dg.DagsterRunStatus.NOT_STARTED]
 
@@ -60,5 +65,6 @@ def refresh_recent_weeks(context: dg.ScheduleEvaluationContext) -> list[dg.RunRe
 lakehouse_automation = dg.AutomationConditionSensorDefinition(
     "lakehouse_automation",
     target=dg.AssetSelection.assets(silver_startgg, gold_startgg),
+    run_tags=max_runtime(LAKEHOUSE),
     default_status=dg.DefaultSensorStatus.RUNNING,
 )
