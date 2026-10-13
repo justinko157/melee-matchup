@@ -2,11 +2,25 @@
 
 **Predicting competitive Super Smash Bros Melee tournament set outcomes.**
 
-Can we predict who wins a tournament set between two players? This project builds a full data science pipeline — from API data collection through modeling — to answer that question using 550,000+ sets across 2,200+ tournaments from the competitive Melee scene (2018–2026).
+Can we predict who wins a tournament set between two players? This project builds a full data platform — from API ingestion through a lakehouse to a served model — to answer that question from competitive Melee tournament results on start.gg.
 
-The best model (XGBoost) achieves **78.5% accuracy** and **0.818 AUC**, significantly outperforming a seed-only baseline (70.0%). The model is also well-calibrated: when it says a player has a 70% chance, they actually win ~70% of the time.
+On the data loaded into the platform so far (2025 onward), the champion XGBoost model reaches **78.4% accuracy** and **0.817 AUC**, against **74.4%** for a seed-only baseline. The original SQLite-era pipeline, trained on 550,000+ sets from 2018 through March 2026, reached 78.5% accuracy and 0.818 AUC.
 
 ## Results at a Glance
+
+### Current platform (champion model version 1)
+
+Data window: bronze weeks 2025-01-06 through 2026-10-05, with a temporal split at 2025-07-01 (train before, test after). These numbers will change once the 2018–2024 backfill is loaded.
+
+| Model | Accuracy | Log Loss | Brier Score | ROC AUC |
+|---|---|---|---|---|
+| Baseline (Seed Only) | 74.4% | 0.540 | 0.177 | 0.755 |
+| Logistic Regression | 77.5% | 0.478 | 0.155 | 0.806 |
+| **XGBoost (champion)** | **78.4%** | **0.464** | **0.150** | **0.817** |
+
+### Original SQLite-era pipeline (2018 – March 2026 data)
+
+Trained before the move to the lakehouse, on 550,000+ sets across 2,200+ tournaments, with the same split date.
 
 | Model | Accuracy | Log Loss | Brier Score | ROC AUC |
 |---|---|---|---|---|
@@ -15,6 +29,8 @@ The best model (XGBoost) achieves **78.5% accuracy** and **0.818 AUC**, signific
 | **XGBoost** | **78.5%** | **0.463** | **0.150** | **0.818** |
 
 ### Key Findings
+
+From the original analysis on the SQLite-era data:
 
 - **Elo rating difference** is the single most predictive feature — a custom rating system built from historical results adds far more signal than tournament seeding alone
 - **Recent form** (rolling 30-set win rate) is the second most important feature, capturing momentum and slumps
@@ -68,16 +84,18 @@ make check-lakehouse      # Spark -> Iceberg -> Trino round trip
 ```
 
 If a port is taken, set `DAGSTER_WEBSERVER_PORT`, `MLFLOW_PORT` or `APP_PORT`
-in `.env`.
+in `.env`. `scripts/dagster_ops.py` talks to http://localhost:3000/graphql by
+default, so when you override `DAGSTER_WEBSERVER_PORT` also set
+`DAGSTER_GRAPHQL_URL` (for example `http://localhost:3001/graphql`).
 
 Each service has a memory limit in `infra/docker-compose.yml`. MLflow gets
 768 MB and runs with `MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false`, which keeps it
 at about 420 MB when idle.
 
 **Using it:**
-1. Backfill `startgg_raw` from the Dagster asset page, or run `python scripts/dagster_ops.py backfill --start 2025-01-06 --end 2025-03-31`.
+1. Backfill `startgg_raw` from the Dagster asset page, or run `uv run python scripts/dagster_ops.py backfill --start 2025-01-06 --end 2025-03-31`.
 2. The `land_bronze_after_ingest` sensor lands each finished week into bronze; silver and gold then follow automatically.
-3. Then train with `python scripts/dagster_ops.py launch train_matchup_model`, or wait for the daily schedule.
+3. Then train with `uv run python scripts/dagster_ops.py launch train_matchup_model`, or wait for the daily schedule.
 
 **One-off commands:**
 - `make bronze-once`, `make silver-once` and `make gold-once` run a single layer by hand.
@@ -102,15 +120,17 @@ Designs:
 
 ## Dataset
 
-| | Count |
-|---|---|
-| Tournaments | 2,209 |
-| Events | 4,026 |
-| Players | 51,763 |
-| Sets | 550,737 |
-| Games | 138,968 |
+All data is collected from the [start.gg](https://start.gg) GraphQL API.
 
-All data collected from the [start.gg](https://start.gg) GraphQL API. The dataset covers offline tournaments with 100+ attendees from January 2018 through March 2026.
+| | Lakehouse silver (2025-01-06 to 2026-10-05 weeks) | Original SQLite DB (Jan 2018 to Mar 2026) |
+|---|---|---|
+| Tournaments | 1,462 | 2,209 |
+| Events | 2,450 | 4,026 |
+| Players | 14,744 | 51,763 |
+| Sets | 150,274 | 550,737 |
+| Games | 129,404 | 138,968 |
+
+The original SQLite database covered offline tournaments with 100+ attendees. The lakehouse counts will grow once the 2018–2024 backfill is loaded.
 
 ## Project Structure
 
@@ -138,8 +158,10 @@ melee-matchup/
 A custom pipeline queries the start.gg GraphQL API to collect tournament brackets, set results, player info, seeds, and game-level data (character picks, stages where available).
 
 ```bash
-python scripts/dagster_ops.py backfill --start 2018-01-01 --end 2024-12-30
+uv run python scripts/dagster_ops.py backfill --start 2018-01-01 --end 2024-12-30
 ```
+
+That range is 366 weekly partitions, about 15 hours at the start.gg API rate limit.
 
 The pipeline handles:
 - **Rate limiting** (80 requests/60s with automatic throttling)
@@ -210,10 +232,11 @@ make up
 ### Quick Start
 
 ```bash
-python scripts/dagster_ops.py backfill --start 2025-01-06 --end 2025-03-31   # ingest
-python scripts/dagster_ops.py launch train_matchup_model                      # train
-open http://localhost:8501                                                    # predict
+uv run python scripts/dagster_ops.py backfill --start 2025-01-06 --end 2025-03-31   # ingest
+uv run python scripts/dagster_ops.py launch train_matchup_model                      # train
 ```
+
+Then open http://localhost:8501 to predict a set.
 
 ## Tools & Technologies
 

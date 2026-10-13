@@ -1,17 +1,21 @@
 """Drive the local Dagster instance over GraphQL: launch jobs and backfills, poll status.
 
 Usage:
-  python scripts/dagster_ops.py launch train_matchup_model
-  python scripts/dagster_ops.py run-status RUN_ID
-  python scripts/dagster_ops.py backfill --start 2018-01-01 --end 2024-12-30
-  python scripts/dagster_ops.py backfill-status BACKFILL_ID
+  uv run python scripts/dagster_ops.py launch train_matchup_model
+  uv run python scripts/dagster_ops.py run-status RUN_ID
+  uv run python scripts/dagster_ops.py backfill --start 2018-01-01 --end 2024-12-30
+  uv run python scripts/dagster_ops.py backfill-status BACKFILL_ID
 
 Set DAGSTER_GRAPHQL_URL if the webserver isn't at http://localhost:3000/graphql.
+Exits non-zero, with the error on stderr, when the call fails or Dagster
+returns anything other than the expected success type.
 """
 
 import argparse
 import json
 import os
+import sys
+import urllib.error
 import urllib.request
 from datetime import date, timedelta
 
@@ -25,6 +29,7 @@ mutation($params: ExecutionParams!) {
     ... on LaunchRunSuccess { run { runId } }
     ... on PythonError { message }
     ... on RunConfigValidationInvalid { errors { message } }
+    ... on PipelineNotFoundError { message }
   }
 }"""
 RUN_STATUS = """
@@ -58,20 +63,37 @@ def weekly_partition_keys(start: date, end: date) -> list[str]:
     return keys
 
 
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
 def graphql(url: str, query: str, variables: dict) -> dict:
     request = urllib.request.Request(
         url,
         json.dumps({"query": query, "variables": variables}).encode(),
         {"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        body = json.loads(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        fail(f"Dagster GraphQL at {url} returned HTTP {error.code}: {error.reason}")
+    except urllib.error.URLError as error:
+        fail(f"Could not reach Dagster GraphQL at {url}: {error.reason} (set DAGSTER_GRAPHQL_URL?)")
     if body.get("errors"):
-        raise RuntimeError(json.dumps(body["errors"]))
+        fail(f"GraphQL errors from {url}: {json.dumps(body['errors'])}")
     return body["data"]
 
 
-def main() -> None:
+def expect(result: dict, typename: str) -> dict:
+    """Return the result if it is the success type; otherwise report it and exit non-zero."""
+    if result.get("__typename") != typename:
+        fail(f"Expected {typename}, got: {json.dumps(result)}")
+    return result
+
+
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawTextHelpFormatter
     )
@@ -83,7 +105,7 @@ def main() -> None:
     backfill.add_argument("--end", type=date.fromisoformat, required=True)
     backfill.add_argument("--asset", default="startgg_raw")
     commands.add_parser("backfill-status").add_argument("backfill_id")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     url = os.getenv("DAGSTER_GRAPHQL_URL", "http://localhost:3000/graphql")
 
     if args.command == "launch":
@@ -93,9 +115,10 @@ def main() -> None:
             "jobName": args.job,
         }
         result = graphql(url, LAUNCH_RUN, {"params": {"selector": selector, "runConfigData": {}}})
-        print(json.dumps(result["launchRun"]))
+        print(json.dumps(expect(result["launchRun"], "LaunchRunSuccess")))
     elif args.command == "run-status":
-        print(json.dumps(graphql(url, RUN_STATUS, {"id": args.run_id})["runOrError"]))
+        result = graphql(url, RUN_STATUS, {"id": args.run_id})
+        print(json.dumps(expect(result["runOrError"], "Run")))
     elif args.command == "backfill":
         keys = weekly_partition_keys(args.start, args.end)
         params = {
@@ -104,13 +127,14 @@ def main() -> None:
             "title": f"{args.asset} {keys[0]}..{keys[-1]}",
         }
         result = graphql(url, LAUNCH_BACKFILL, {"params": params})
-        print(len(keys), "partitions:", json.dumps(result["launchPartitionBackfill"]))
-    else:
         print(
-            json.dumps(
-                graphql(url, BACKFILL_STATUS, {"id": args.backfill_id})["partitionBackfillOrError"]
-            )
+            len(keys),
+            "partitions:",
+            json.dumps(expect(result["launchPartitionBackfill"], "LaunchBackfillSuccess")),
         )
+    else:
+        result = graphql(url, BACKFILL_STATUS, {"id": args.backfill_id})
+        print(json.dumps(expect(result["partitionBackfillOrError"], "PartitionBackfill")))
 
 
 if __name__ == "__main__":
