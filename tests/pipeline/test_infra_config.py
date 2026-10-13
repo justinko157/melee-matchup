@@ -46,3 +46,8 @@ def test_lakekeeper_bootstrap_only_tolerates_already_bootstrapped():
 def test_makefile_env_file_is_optional():
     makefile = Path("Makefile").read_text(encoding="utf-8")
     assert "$(if $(wildcard .env),--env-file .env)" in makefile
+
+
+def test_pipeline_image_installs_the_ml_extra():
+    dockerfile = Path("infra/pipeline.Dockerfile").read_text(encoding="utf-8")
+    assert "--extra pipeline --extra ml --extra dev" in dockerfile
