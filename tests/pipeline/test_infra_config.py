@@ -90,6 +90,8 @@ def test_app_service_reads_gold_and_mlflow():
     assert "image: melee-app:dev" in app
     assert "LAKEKEEPER_URL: http://lakekeeper:8181/catalog" in app
     assert "MLFLOW_TRACKING_URI: http://mlflow:5000" in app
+    assert 'MLFLOW_HTTP_REQUEST_MAX_RETRIES: "0"' in app
+    assert 'MLFLOW_HTTP_REQUEST_TIMEOUT: "5"' in app
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
     assert "data/" not in dockerfile
     assert "COPY pipeline/serving/" in dockerfile

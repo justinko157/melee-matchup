@@ -7,6 +7,10 @@ gold tables and the MLflow champion model.
 import math
 import os
 
+# Fail fast when MLflow is down instead of retrying for minutes on every rerun.
+os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
+os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "5")
+
 import pandas as pd
 import plotly.express as px
 import shap
@@ -18,12 +22,13 @@ from pipeline.serving.champion import load_champion
 from pipeline.serving.gold_reader import load_head_to_head, load_player_ratings, lookup_h2h
 
 UNAVAILABLE = "The data platform is unavailable"
+MIN_SETS = 5
 
 
 @st.cache_resource(ttl=3600)
 def load_gold():
     catalog = load_lakehouse_catalog()
-    return load_player_ratings(catalog), load_head_to_head(catalog)
+    return load_player_ratings(catalog, MIN_SETS), load_head_to_head(catalog)
 
 
 @st.cache_resource(ttl=3600)
@@ -59,6 +64,9 @@ try:
     players, h2h_df = load_gold()
 except Exception as exc:  # show which part of the platform is down, never a traceback
     st.error(f"{UNAVAILABLE}: the lakehouse catalog could not be read ({type(exc).__name__}).")
+    st.stop()
+if players.empty:
+    st.error(f"{UNAVAILABLE}: the gold tables have no players with at least {MIN_SETS} sets yet.")
     st.stop()
 try:
     model, explainer = load_model()

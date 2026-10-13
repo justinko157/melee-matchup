@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from pipeline.ml.names import CHAMPION_ALIAS, MODEL_NAME, SHAP_ARTIFACT
 from pipeline.model_features import CORE_FEATURES
 
+# What the registry answers when the model or its alias does not exist yet. Any other
+# MlflowException (an unreachable server, a 5xx) is not a missing champion.
+ALIAS_MISSING_CODES = frozenset({"RESOURCE_DOES_NOT_EXIST", "INVALID_PARAMETER_VALUE"})
+
 
 class ChampionNotFound(RuntimeError):
     """No model version holds the champion alias yet."""
@@ -29,6 +33,8 @@ def load_champion(tracking_uri: str) -> Champion:
     try:
         version = client.get_model_version_by_alias(MODEL_NAME, CHAMPION_ALIAS)
     except MlflowException as exc:
+        if exc.error_code not in ALIAS_MISSING_CODES:
+            raise
         raise ChampionNotFound(
             f"No '{CHAMPION_ALIAS}' version of {MODEL_NAME} is registered yet"
         ) from exc

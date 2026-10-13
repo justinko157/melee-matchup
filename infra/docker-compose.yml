@@ -363,6 +363,9 @@ services:
       LAKEKEEPER_URL: http://lakekeeper:8181/catalog
       LAKEHOUSE_WAREHOUSE: melee
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      # Fail fast when MLflow is down instead of retrying for minutes on every rerun.
+      MLFLOW_HTTP_REQUEST_MAX_RETRIES: "0"
+      MLFLOW_HTTP_REQUEST_TIMEOUT: "5"
     ports:
       - "${APP_PORT:-8501}:8501"
     mem_limit: 768m
