@@ -354,6 +354,24 @@ services:
       dagster-pools:
         condition: service_completed_successfully
 
+  app:
+    image: melee-app:dev
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      LAKEKEEPER_URL: http://lakekeeper:8181/catalog
+      LAKEHOUSE_WAREHOUSE: melee
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    ports:
+      - "${APP_PORT:-8501}:8501"
+    mem_limit: 768m
+    depends_on:
+      lakekeeper-warehouse:
+        condition: service_completed_successfully
+      mlflow:
+        condition: service_healthy
+
   pipeline-tools:
     # One-off commands: Spark tests, lakehouse checks, ad-hoc bronze runs.
     <<: *pipeline-image

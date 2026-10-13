@@ -13,3 +13,5 @@ services:
     ports: !reset []
   dagster-webserver:
     ports: !reset []
+  app:
+    ports: !reset []

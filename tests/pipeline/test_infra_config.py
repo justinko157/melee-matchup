@@ -33,7 +33,7 @@ def test_compose_images_are_pinned():
     images = re.findall(r"^\s*image:\s*(\S+)", COMPOSE, flags=re.MULTILINE)
     assert images
     for image in images:
-        if image == "melee-pipeline:dev":
+        if image in ("melee-pipeline:dev", "melee-app:dev"):
             continue
         assert ":" in image and not image.endswith((":latest", ":latest-main")), image
 
@@ -83,3 +83,13 @@ def test_dagster_pools_service_sets_every_pool():
     for pool in ALL_POOLS:
         assert f"concurrency set {pool} 1" in pools
     assert "spark_bronze" not in pools
+
+
+def test_app_service_reads_gold_and_mlflow():
+    app = _service("app")
+    assert "image: melee-app:dev" in app
+    assert "LAKEKEEPER_URL: http://lakekeeper:8181/catalog" in app
+    assert "MLFLOW_TRACKING_URI: http://mlflow:5000" in app
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    assert "data/" not in dockerfile
+    assert "COPY pipeline/serving/" in dockerfile

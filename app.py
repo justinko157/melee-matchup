@@ -1,54 +1,35 @@
 """MeleeMatchup — Streamlit App
 
-Interactive predictions for competitive Melee tournament sets.
+Interactive predictions for competitive Melee tournament sets, served from the
+gold tables and the MLflow champion model.
 """
 
 import math
-from pathlib import Path
+import os
 
 import pandas as pd
 import plotly.express as px
 import shap
 import streamlit as st
-import xgboost as xgb
 
-APP_DATA = Path(__file__).parent / "data" / "app"
-CORE_FEATURES = [
-    "elo_diff",
-    "p1_expected",
-    "p1_sets_played",
-    "p2_sets_played",
-    "recent_wr_diff",
-    "p1_h2h_wr",
-    "h2h_total",
-    "seed_diff",
-    "num_attendees",
-]
+from pipeline.lakehouse import load_lakehouse_catalog
+from pipeline.model_features import CORE_FEATURES
+from pipeline.serving.champion import load_champion
+from pipeline.serving.gold_reader import load_head_to_head, load_player_ratings, lookup_h2h
+
+UNAVAILABLE = "The data platform is unavailable"
 
 
-@st.cache_resource
+@st.cache_resource(ttl=3600)
+def load_gold():
+    catalog = load_lakehouse_catalog()
+    return load_player_ratings(catalog), load_head_to_head(catalog)
+
+
+@st.cache_resource(ttl=3600)
 def load_model():
-    model = xgb.XGBClassifier()
-    model.load_model(str(APP_DATA / "model.json"))
-    return model
-
-
-@st.cache_data
-def load_players():
-    df = pd.read_parquet(APP_DATA / "players.parquet")
-    return df[df["sets_played"] >= 5].sort_values("elo", ascending=False).reset_index(drop=True)
-
-
-@st.cache_data
-def load_h2h():
-    return pd.read_parquet(APP_DATA / "h2h.parquet")
-
-
-@st.cache_resource
-def load_shap_explainer():
-    model = load_model()
-    explainer = shap.TreeExplainer(model)
-    return explainer
+    champion = load_champion(os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000"))
+    return champion.model, shap.TreeExplainer(champion.model)
 
 
 FEATURE_LABELS = {
@@ -64,18 +45,6 @@ FEATURE_LABELS = {
 }
 
 
-def get_h2h(h2h_df, pid1, pid2):
-    """Look up head-to-head record between two players."""
-    pa, pb = min(pid1, pid2), max(pid1, pid2)
-    row = h2h_df[(h2h_df["player_a"] == pa) & (h2h_df["player_b"] == pb)]
-    if row.empty:
-        return 0, 0
-    r = row.iloc[0]
-    if pid1 == pa:
-        return int(r["a_wins"]), int(r["b_wins"])
-    return int(r["b_wins"]), int(r["a_wins"])
-
-
 def elo_expected(ra, rb):
     return 1.0 / (1.0 + math.pow(10, (rb - ra) / 400))
 
@@ -86,10 +55,18 @@ def elo_expected(ra, rb):
 
 st.set_page_config(page_title="MeleeMatchup", page_icon="🎮", layout="wide")
 
-model = load_model()
-players = load_players()
-h2h_df = load_h2h()
-explainer = load_shap_explainer()
+try:
+    players, h2h_df = load_gold()
+except Exception as exc:  # show which part of the platform is down, never a traceback
+    st.error(f"{UNAVAILABLE}: the lakehouse catalog could not be read ({type(exc).__name__}).")
+    st.stop()
+try:
+    model, explainer = load_model()
+except Exception as exc:
+    st.error(
+        f"{UNAVAILABLE}: the MLflow champion model could not be loaded ({type(exc).__name__})."
+    )
+    st.stop()
 
 # Sidebar navigation
 page = st.sidebar.radio("Navigate", ["Match Predictor", "Elo Leaderboard"], index=0)
@@ -120,7 +97,7 @@ if page == "Match Predictor":
         p2 = players[players["gamer_tag"] == p2_name].iloc[0]
 
         # Head-to-head
-        p1_h2h_w, p2_h2h_w = get_h2h(h2h_df, p1["player_id"], p2["player_id"])
+        p1_h2h_w, p2_h2h_w = lookup_h2h(h2h_df, p1["player_id"], p2["player_id"])
         h2h_total = p1_h2h_w + p2_h2h_w
         p1_h2h_wr = p1_h2h_w / h2h_total if h2h_total > 0 else 0.5
 
