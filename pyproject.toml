@@ -42,9 +42,6 @@ pipeline = [
     "pyiceberg[pyarrow,pyiceberg-core]==0.12.0",
 ]
 
-[project.scripts]
-melee-collect = "src.collect:main"
-
 [tool.ruff]
 line-length = 100
 target-version = "py312"
