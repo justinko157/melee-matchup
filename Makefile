@@ -1,5 +1,5 @@
 SHELL := bash
-.PHONY: install collect features validate train tune export app test lint format docker-build docker-run clean up down nuke ps logs check-lakehouse test-spark bronze-once smoke
+.PHONY: install collect features validate train tune export app test lint format docker-build docker-run clean up down nuke ps logs check-lakehouse test-spark bronze-once silver-once smoke
 
 # ── Setup ──────────────────────────────────────────────
 install:
@@ -43,6 +43,10 @@ smoke:
 bronze-once:
 	$(COMPOSE) run --rm pipeline-tools spark-submit pipeline/spark_jobs/bronze_job.py \
 		--bootstrap-servers kafka:9092 --checkpoint-root /checkpoints/bronze
+
+silver-once:
+	$(COMPOSE) run --rm pipeline-tools spark-submit pipeline/spark_jobs/silver_job.py \
+		--lock-dir /checkpoints/silver
 
 # ── Data Pipeline ──────────────────────────────────────
 collect:

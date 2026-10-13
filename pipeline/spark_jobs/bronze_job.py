@@ -7,7 +7,6 @@ goes through Iceberg's exactly-once streaming sink.
 
 import argparse
 import json
-import os
 import sys
 from datetime import UTC, datetime
 from typing import IO
@@ -25,6 +24,7 @@ from pipeline.spark_jobs.bronze import (
     parse_envelopes,
     reject_rows,
 )
+from pipeline.spark_jobs.locks import exclusive_lock
 from pipeline.topics import RAW_TOPICS, SETS_TOPIC, TOURNAMENTS_TOPIC
 
 
@@ -92,16 +92,7 @@ def lock_checkpoints(checkpoint_root: str) -> IO:
     `make bronze-once` and Dagster bronze runs share the checkpoint volume, and two
     streaming queries on one checkpoint corrupt it. Keep the returned file open.
     """
-    import fcntl  # Linux only; imported here so the module still imports on Windows hosts
-
-    os.makedirs(checkpoint_root, exist_ok=True)
-    lock_file = open(os.path.join(checkpoint_root, ".lock"), "w")
-    try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        lock_file.close()
-        sys.exit(f"another bronze job is running (lock held on {checkpoint_root}/.lock)")
-    return lock_file
+    return exclusive_lock(checkpoint_root, "bronze")
 
 
 def main(argv: list[str] | None = None) -> None:

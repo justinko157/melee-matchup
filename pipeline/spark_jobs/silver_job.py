@@ -188,3 +188,25 @@ def run_silver(spark: SparkSession) -> dict:
         write_watermarks(spark, advanced)
     summary.update(integrity_counts(spark))
     return summary
+
+
+def main(argv: list[str] | None = None) -> None:
+    import argparse
+    import json
+
+    from pipeline.spark_jobs.locks import exclusive_lock
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lock-dir", required=True)
+    args = parser.parse_args(argv)
+    lock = exclusive_lock(args.lock_dir, "silver")
+
+    spark = SparkSession.builder.appName("silver-startgg").getOrCreate()
+    summary = run_silver(spark)
+    spark.stop()
+    lock.close()
+    print(json.dumps(summary))
+
+
+if __name__ == "__main__":
+    main()
