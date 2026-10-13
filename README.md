@@ -10,7 +10,7 @@ On the data loaded into the platform so far (2025 onward), the champion XGBoost 
 
 ### Current platform (champion model version 1)
 
-Data window: bronze weeks 2025-01-06 through 2026-10-05, with a temporal split at 2025-07-01 (train before, test after). These numbers will change once the 2018–2024 backfill is loaded.
+Data window: bronze weeks 2025-01-06 through 2026-10-05, with a temporal split at 2025-07-01 (train before, test after). These numbers will change once the 2018–2024 backfill is loaded. XGBoost early-stops on the test split, so its reported metrics are slightly optimistic (the original SQLite-era numbers below share this); early-stopping on a time-based validation slice of the training data instead is a planned follow-up.
 
 | Model | Accuracy | Log Loss | Brier Score | ROC AUC |
 |---|---|---|---|---|
