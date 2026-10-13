@@ -1,7 +1,6 @@
 """Tests for the Elo rating engine."""
 
-
-from src.features import DEFAULT_ELO, EloEngine
+from pipeline.gold.features import DEFAULT_ELO, EloEngine
 
 
 def test_initial_rating():
