@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import dagster as dg
 import pytest
 import yaml
 
@@ -38,3 +39,13 @@ def test_run_monitoring_enforces_max_runtime():
     assert monitoring["enabled"] is True
     # Runs with no tag (asset-page launches, backfills) still get the longest limit.
     assert monitoring["max_runtime_seconds"] == 19800
+
+
+def test_refresh_lakehouse_job_rebuilds_silver_and_gold():
+    # A fallback for `dagster_ops.py launch refresh_lakehouse` when automation doesn't fire.
+    job = defs.resolve_job_def("refresh_lakehouse")
+    assert job.asset_layer.executable_asset_keys == {
+        dg.AssetKey("silver_startgg"),
+        dg.AssetKey("gold_startgg"),
+    }
+    assert job.tags[MAX_RUNTIME] == "19800"

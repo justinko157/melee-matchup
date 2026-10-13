@@ -13,6 +13,10 @@ ingest_job = dg.define_asset_job(
 bronze_job = dg.define_asset_job(
     "land_bronze", selection=[bronze_startgg], tags=max_runtime(BRONZE)
 )
+# Silver then gold by hand, for when declarative automation doesn't fire.
+refresh_lakehouse_job = dg.define_asset_job(
+    "refresh_lakehouse", selection=[silver_startgg, gold_startgg], tags=max_runtime(LAKEHOUSE)
+)
 
 PENDING = [dg.DagsterRunStatus.QUEUED, dg.DagsterRunStatus.NOT_STARTED]
 
