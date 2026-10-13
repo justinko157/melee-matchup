@@ -162,8 +162,8 @@ Expiring bronze snapshots older than a silver watermark is safe, because silver 
 | Asset / job | Runs | Pool | Checks |
 |---|---|---|---|
 | `silver_startgg` | `AutomationCondition.eager()` after `bronze_startgg` | `spark_lakehouse` | `no_orphan_sets`, `drop_rate_below_10pct`, `winner_is_a_player` |
-| `gold_startgg` | `AutomationCondition.eager()` after `silver_startgg` | `gold` (limit 1) | `features_match_silver`, `no_null_features`, `completed_at_non_decreasing` |
-| `matchup_model` | Daily schedule at 07:00 PT; skipped when the gold snapshot equals the champion's `gold_snapshot_id` tag | `training` (limit 1) | `model_beats_baseline` |
+| `gold_startgg` | `AutomationCondition.eager()` after `silver_startgg` | `spark_lakehouse` | `features_match_silver`, `no_null_features`, `completed_at_non_decreasing` |
+| `matchup_model` | Daily schedule at 07:00 PT; skipped when the gold snapshot equals the champion's `gold_snapshot_id` tag | `spark_lakehouse` | `model_beats_baseline` |
 | `lakehouse_maintenance` | Weekly schedule | `spark_lakehouse` | none (metadata only) |
 
 The check details:
@@ -176,7 +176,7 @@ The check details:
 - **`completed_at_non_decreasing`:** `completed_at` must not decrease in `set_features` row order.
 - **`model_beats_baseline`:** XGBoost log loss must be below the baseline's.
 
-The pool `spark_bronze` is renamed `spark_lakehouse` and shared by the bronze, silver and maintenance jobs, so two Spark local-mode drivers never run at once. The `dagster-pools` service sets `spark_lakehouse`, `gold` and `training` to 1.
+The pool `spark_bronze` is renamed `spark_lakehouse` and shared by the bronze, silver, gold, training and maintenance runs (limit 1), because every run executes inside `dagster-code` (3 GB) and overlapping gold (~1.4 GB), Spark (~1.5 GB) and training (~1 GB) runs could OOM-kill a run worker. The `dagster-pools` service sets `startgg_api` and `spark_lakehouse` to 1.
 
 The automation condition sensor must be enabled in the Dagster definitions.
 
@@ -270,7 +270,7 @@ Docker has 7.3 GB.
 
 - MLflow is about 300 MB (limit 512 MB) and the app about 500 MB (limit 768 MB), on top of the current stack.
 - Gold's pandas pass over about 1.2 M sets (2018 onward) is about 1 GB. It runs inside `dagster-code`, which has a 3 GB limit.
-- Spark silver runs in local mode inside `dagster-code`, never at the same time as bronze, because of the shared pool.
+- Spark silver runs in local mode inside `dagster-code`, never at the same time as bronze, gold or training, because of the shared pool.
 
 ## Done criteria
 

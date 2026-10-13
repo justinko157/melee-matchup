@@ -4,7 +4,7 @@ import dagster as dg
 import pandas as pd
 
 from pipeline.dagster_defs.lakehouse_assets import gold_startgg
-from pipeline.dagster_defs.pools import TRAINING
+from pipeline.dagster_defs.pools import SPARK_LAKEHOUSE
 from pipeline.dagster_defs.resources import LakehouseResource, MlflowResource
 from pipeline.gold.tables import SET_FEATURES
 from pipeline.lakehouse import current_snapshot_id
@@ -19,7 +19,7 @@ class TrainingConfig(dg.Config):
 
 @dg.asset(
     deps=[gold_startgg],
-    pool=TRAINING,
+    pool=SPARK_LAKEHOUSE,
     group_name="ml",
     kinds={"xgboost", "mlflow"},
     check_specs=[dg.AssetCheckSpec("model_beats_baseline", asset="matchup_model")],

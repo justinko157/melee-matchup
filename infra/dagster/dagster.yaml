@@ -14,7 +14,8 @@ storage:
 concurrency:
   pools:
     # Every pool runs one at a time: startgg_api (shared API rate limit),
-    # spark_lakehouse (one Spark driver; bronze checkpoints), gold, training.
+    # spark_lakehouse (bronze, silver, gold, training and maintenance: one
+    # memory-heavy run at a time in dagster-code).
     default_limit: 1
     granularity: run
 

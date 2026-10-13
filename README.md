@@ -74,6 +74,7 @@ gold --> XGBoost (MLflow registry, champion alias) --> Streamlit app
 - Silver and gold run on Dagster declarative automation after each bronze landing.
 - The model trains daily at 07:00 PT when gold has changed. A new version only takes the `champion` alias if it beats the seed-only baseline, and matches or beats the current champion.
 - Weekly maintenance (Sunday 03:00 PT) compacts small files, expires old snapshots and removes orphan files.
+- Bronze, silver, gold, training and maintenance share the `spark_lakehouse` pool (limit 1): every run executes inside the 3 GB `dagster-code` container, so only one memory-heavy run goes at a time.
 
 **Run it** (needs Docker with ~7 GB of memory and GNU make):
 

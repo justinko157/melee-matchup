@@ -70,3 +70,7 @@ def test_training_schedule_runs_daily_at_7_pacific():
     assert daily_training.cron_schedule == "0 7 * * *"
     assert daily_training.execution_timezone == "America/Los_Angeles"
     assert daily_training.default_status == dg.DefaultScheduleStatus.RUNNING
+
+
+def test_training_shares_the_lakehouse_pool():
+    assert matchup_model.op.pool == "spark_lakehouse"

@@ -326,7 +326,7 @@ services:
     command:
       - bash
       - -c
-      - dagster instance concurrency set startgg_api 1 && dagster instance concurrency set spark_lakehouse 1 && dagster instance concurrency set gold 1 && dagster instance concurrency set training 1
+      - dagster instance concurrency set startgg_api 1 && dagster instance concurrency set spark_lakehouse 1
     depends_on:
       postgres:
         condition: service_healthy

@@ -3,7 +3,7 @@
 import dagster as dg
 
 from pipeline.dagster_defs.assets import bronze_startgg
-from pipeline.dagster_defs.pools import GOLD, SPARK_LAKEHOUSE
+from pipeline.dagster_defs.pools import SPARK_LAKEHOUSE
 from pipeline.dagster_defs.resources import LakehouseResource, SparkJobResource
 from pipeline.gold.build import build_gold, gold_checks
 from pipeline.gold.tables import HEAD_TO_HEAD, PLAYER_RATINGS, SET_FEATURES
@@ -68,7 +68,7 @@ def silver_startgg(spark_job: SparkJobResource) -> dg.MaterializeResult:
 
 @dg.asset(
     deps=[silver_startgg],
-    pool=GOLD,
+    pool=SPARK_LAKEHOUSE,
     group_name="gold",
     kinds={"python", "iceberg"},
     automation_condition=dg.AutomationCondition.eager(),

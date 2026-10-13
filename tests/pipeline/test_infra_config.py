@@ -83,6 +83,9 @@ def test_dagster_pools_service_sets_every_pool():
     for pool in ALL_POOLS:
         assert f"concurrency set {pool} 1" in pools
     assert "spark_bronze" not in pools
+    # gold and training moved into spark_lakehouse.
+    assert ALL_POOLS == ("startgg_api", "spark_lakehouse")
+    assert pools.count("concurrency set") == len(ALL_POOLS)
 
 
 def test_app_service_reads_gold_and_mlflow():

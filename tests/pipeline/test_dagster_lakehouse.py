@@ -133,7 +133,7 @@ def test_automation_sensor_runs_by_default_and_targets_silver_and_gold():
     assert selected == {silver_startgg.key, gold_startgg.key}
 
 
-def test_spark_jobs_share_one_pool():
-    assert bronze_startgg.op.pool == "spark_lakehouse"
-    assert silver_startgg.op.pool == "spark_lakehouse"
-    assert gold_startgg.op.pool == "gold"
+def test_memory_heavy_assets_share_one_pool():
+    # dagster-code (3 GB) runs every run; bronze, silver, gold and training run one at a time.
+    for asset in (bronze_startgg, silver_startgg, gold_startgg):
+        assert asset.op.pool == "spark_lakehouse"
