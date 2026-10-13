@@ -59,6 +59,7 @@ addopts = "-m 'not spark'"
 filterwarnings = [
     'ignore:datetime.datetime.utcfromtimestamp\(\) is deprecated:DeprecationWarning:dagster.*',
     'ignore:The set_(bad|over|under) function will be deprecated:PendingDeprecationWarning:shap.*',
+    'ignore:The ``noload`` loader strategy is deprecated:sqlalchemy.exc.SADeprecationWarning:mlflow.*',
 ]
 markers = [
     "spark: needs a local SparkSession (Java). Run with `make test-spark`.",

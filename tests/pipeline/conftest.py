@@ -51,3 +51,16 @@ def sql_catalog(sql_settings):
     from pipeline.lakehouse import load_lakehouse_catalog
 
     return load_lakehouse_catalog(sql_settings)
+
+
+@pytest.fixture
+def mlflow_tracking(tmp_path):
+    """A throwaway SQLite-backed MLflow tracking store and registry."""
+    mlflow = pytest.importorskip("mlflow")
+    from pipeline.ml.names import EXPERIMENT
+
+    uri = f"sqlite:///{(tmp_path / 'mlflow.db').as_posix()}"
+    mlflow.set_tracking_uri(uri)
+    mlflow.set_registry_uri(uri)
+    mlflow.create_experiment(EXPERIMENT, artifact_location=(tmp_path / "artifacts").as_uri())
+    return uri
