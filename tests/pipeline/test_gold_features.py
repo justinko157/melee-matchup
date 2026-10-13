@@ -3,7 +3,8 @@ import random
 import numpy as np
 import pandas as pd
 
-from pipeline.gold.features import FEATURE_COLUMNS, build_features
+from pipeline.gold.features import FEATURE_COLUMNS, SET_INPUT_COLUMNS, build_features
+from pipeline.gold.schema import features_schema
 from pipeline.model_features import CORE_FEATURES
 
 BASE = {
@@ -138,3 +139,32 @@ def test_state_tracks_records_for_gold_tables():
     assert state.h2h[(100, 200)] == [2, 0]
     assert state.pair_last_played[(100, 200)] == pd.Timestamp(2000020, unit="s", tz="UTC")
     assert state.last_played[300] == pd.Timestamp(2000010, unit="s", tz="UTC")
+
+
+def test_all_default_ratings_still_satisfy_the_schema():
+    rows = [
+        {
+            "set_id": 1,
+            "completed_at": 1000,
+            "player1_id": 1,
+            "player2_id": 2,
+            "winner_player_id": 1,
+        },
+        {
+            "set_id": 2,
+            "completed_at": 1001,
+            "player1_id": 3,
+            "player2_id": 4,
+            "winner_player_id": 4,
+        },
+    ]
+    features, _ = build_features(sets_frame(rows))
+    features_schema.validate(features)
+
+
+def test_empty_input_yields_a_schema_valid_empty_frame():
+    empty = pd.DataFrame({column: [] for column in SET_INPUT_COLUMNS})
+    features, _ = build_features(empty)
+    assert len(features) == 0
+    assert tuple(features.columns) == FEATURE_COLUMNS
+    features_schema.validate(features)

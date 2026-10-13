@@ -133,6 +133,52 @@ def eligible_sets(sets: pd.DataFrame) -> pd.DataFrame:
     return ordered.reset_index(drop=True)
 
 
+_FLOAT_COLUMNS = (
+    "p1_elo",
+    "p2_elo",
+    "elo_diff",
+    "p1_expected",
+    "p1_recent_wr",
+    "p2_recent_wr",
+    "recent_wr_diff",
+    "p1_h2h_wr",
+    "p1_score",
+    "p2_score",
+)
+_INT_COLUMNS = (
+    "set_id",
+    "event_id",
+    "tournament_id",
+    "player1_id",
+    "player2_id",
+    "p1_sets_played",
+    "p2_sets_played",
+    "p1_h2h_wins",
+    "p2_h2h_wins",
+    "h2h_total",
+    "seed_diff",
+    "num_attendees",
+    "p1_won",
+)
+
+
+def _typed(frame: pd.DataFrame) -> pd.DataFrame:
+    """Give every column the dtype features_schema expects, also for all-default or empty input."""
+    frame = frame.astype(
+        {
+            **dict.fromkeys(_FLOAT_COLUMNS, "float64"),
+            **dict.fromkeys(_INT_COLUMNS, "int64"),
+            "p1_seed": "Int64",
+            "p2_seed": "Int64",
+            "tournament_name": "object",
+        }
+    )
+    frame["completed_at"] = pd.to_datetime(frame["completed_at"], utc=True).astype(
+        "datetime64[us, UTC]"
+    )
+    return frame
+
+
 def build_features(sets: pd.DataFrame) -> tuple[pd.DataFrame, FeatureState]:
     """Build the feature matrix (FEATURE_COLUMNS) and return the final state."""
     state = FeatureState()
@@ -207,4 +253,4 @@ def build_features(sets: pd.DataFrame) -> tuple[pd.DataFrame, FeatureState]:
         state.last_played[p1] = state.last_played[p2] = row.completed_at
         state.pair_last_played[pair] = row.completed_at
 
-    return pd.DataFrame(rows, columns=list(FEATURE_COLUMNS)), state
+    return _typed(pd.DataFrame(rows, columns=list(FEATURE_COLUMNS))), state
