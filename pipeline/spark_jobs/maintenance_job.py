@@ -2,7 +2,8 @@
 
 Run with spark-submit. The last line of stdout is a JSON summary. The exit code is 1
 if compaction or snapshot expiry failed on any table; orphan-file cleanup failures
-are reported but not fatal.
+are reported but not fatal. On a fatal failure the JSON summary is also printed
+to stderr, because the Dagster resource keeps only stderr when the job fails.
 """
 
 import json
@@ -13,12 +14,13 @@ from pyspark.sql import SparkSession
 
 from pipeline.gold.tables import GOLD_TABLES
 from pipeline.spark_jobs.bronze import BRONZE_TABLES, REJECTS_TABLE
-from pipeline.spark_jobs.silver import MERGE_ORDER, table_name
+from pipeline.spark_jobs.silver import MERGE_ORDER, WATERMARKS_TABLE, table_name
 
 MAINTAINED_TABLES = (
     *BRONZE_TABLES.values(),
     REJECTS_TABLE,
     *(table_name(entity) for entity in MERGE_ORDER),
+    WATERMARKS_TABLE,
     *GOLD_TABLES,
 )
 TARGET_FILE_SIZE_BYTES = 128 * 1024 * 1024
@@ -45,9 +47,11 @@ def maintenance_sql(catalog: str, table: str, now: datetime) -> dict[str, str]:
             f"CALL {catalog}.system.expire_snapshots(table => '{table}', "
             f"older_than => TIMESTAMP '{expire_before}', retain_last => {RETAIN_LAST})"
         ),
+        # Prefix listing goes through the table's FileIO (S3FileIO with vended credentials);
+        # the default lists through Hadoop FileSystem, which has no s3 scheme in our image.
         "remove_orphan_files": (
             f"CALL {catalog}.system.remove_orphan_files(table => '{table}', "
-            f"older_than => TIMESTAMP '{orphans_before}')"
+            f"older_than => TIMESTAMP '{orphans_before}', prefix_listing => true)"
         ),
     }
 
@@ -90,16 +94,24 @@ def fatal_errors(summary: dict) -> list[str]:
     ]
 
 
+def report(summary: dict) -> int:
+    """Print the summary (last stdout line) and return the exit code."""
+    line = json.dumps(summary)
+    print(line)
+    fatal = fatal_errors(summary)
+    if not fatal:
+        return 0
+    print(f"maintenance failed: {fatal}", file=sys.stderr)
+    print(line, file=sys.stderr)
+    return 1
+
+
 def main() -> None:
     spark = SparkSession.builder.appName("lakehouse-maintenance").getOrCreate()
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     summary = run_maintenance(spark)
     spark.stop()
-    print(json.dumps(summary))
-    fatal = fatal_errors(summary)
-    if fatal:
-        print(f"maintenance failed: {fatal}", file=sys.stderr)
-        sys.exit(1)
+    sys.exit(report(summary))
 
 
 if __name__ == "__main__":
