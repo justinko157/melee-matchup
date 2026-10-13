@@ -1,5 +1,5 @@
 SHELL := bash
-.PHONY: install collect features validate train tune export app test lint format docker-build docker-run clean up down nuke ps logs check-lakehouse test-spark bronze-once silver-once smoke
+.PHONY: install collect features validate train tune export app test lint format docker-build docker-run clean up down nuke ps logs check-lakehouse test-spark bronze-once silver-once gold-once smoke
 
 # ── Setup ──────────────────────────────────────────────
 install:
@@ -47,6 +47,9 @@ bronze-once:
 silver-once:
 	$(COMPOSE) run --rm pipeline-tools spark-submit pipeline/spark_jobs/silver_job.py \
 		--lock-dir /checkpoints/silver
+
+gold-once:
+	$(COMPOSE) run --rm pipeline-tools python -m pipeline.gold.build
 
 # ── Data Pipeline ──────────────────────────────────────
 collect:
