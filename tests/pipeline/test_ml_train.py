@@ -5,6 +5,7 @@ pytest.importorskip("xgboost")
 
 from optuna.trial import FixedTrial  # noqa: E402
 
+import pipeline.ml.train as train_module  # noqa: E402
 from pipeline.ml.train import (  # noqa: E402
     filter_min_sets,
     quantile_split,
@@ -16,7 +17,7 @@ from pipeline.ml.train import (  # noqa: E402
     train_xgboost,
 )
 from pipeline.ml.tuning import objective  # noqa: E402
-from pipeline.model_features import CORE_FEATURES  # noqa: E402
+from pipeline.model_features import CORE_FEATURES, TARGET  # noqa: E402
 from tests.pipeline.ml_data import synthetic_gold_features  # noqa: E402
 
 
@@ -74,3 +75,21 @@ def test_tuning_objective_returns_auc_without_mlflow():
               "reg_lambda": 1e-3}  # fmt: skip
     auc = objective(FixedTrial(params), train, test, log_to_mlflow=False)
     assert 0.5 < auc <= 1.0
+
+
+def test_load_features_reads_only_the_training_columns(monkeypatch):
+    requested = {}
+
+    def fake_read_table(catalog, identifier, columns, snapshot_id=None):
+        requested.update(identifier=identifier, columns=columns, snapshot_id=snapshot_id)
+        return synthetic_gold_features(20).sample(frac=1, random_state=1)[list(columns)]
+
+    monkeypatch.setattr(train_module, "current_snapshot_id", lambda catalog, identifier: 42)
+    monkeypatch.setattr(train_module, "read_table", fake_read_table)
+    df, snapshot = train_module.load_features(object())
+    assert snapshot == 42 and requested["snapshot_id"] == 42
+    assert requested["identifier"] == "gold.set_features"
+    assert set(requested["columns"]) == {"set_id", "completed_at", *CORE_FEATURES, TARGET}
+    assert len(requested["columns"]) == len(set(requested["columns"]))
+    assert df["completed_at"].is_monotonic_increasing
+    assert list(df.index) == list(range(20))

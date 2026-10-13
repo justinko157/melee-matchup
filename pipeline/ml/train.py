@@ -21,7 +21,6 @@ from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
-from pipeline.gold.features import FEATURE_COLUMNS
 from pipeline.gold.tables import SET_FEATURES
 from pipeline.lakehouse import current_snapshot_id, load_lakehouse_catalog, read_table
 from pipeline.model_features import CORE_FEATURES, SEED_FEATURES, TARGET
@@ -49,10 +48,17 @@ class ModelResult:
     feature_importances: np.ndarray | None = None
 
 
+# What splitting, the min_sets filter and the models use (SEED_FEATURES and the
+# sets-played columns are in CORE_FEATURES); reading only these keeps training memory down.
+TRAINING_COLUMNS = tuple(
+    dict.fromkeys(["set_id", "completed_at", *CORE_FEATURES, *SEED_FEATURES, TARGET])
+)
+
+
 def load_features(catalog: Catalog) -> tuple[pd.DataFrame, int | None]:
-    """gold.set_features in time order, plus the snapshot it was read from."""
+    """The training columns of gold.set_features in time order, plus the snapshot read."""
     snapshot = current_snapshot_id(catalog, SET_FEATURES)
-    df = read_table(catalog, SET_FEATURES, FEATURE_COLUMNS, snapshot_id=snapshot)
+    df = read_table(catalog, SET_FEATURES, TRAINING_COLUMNS, snapshot_id=snapshot)
     return df.sort_values(["completed_at", "set_id"]).reset_index(drop=True), snapshot
 
 
