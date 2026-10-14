@@ -68,7 +68,7 @@ gold --> XGBoost (MLflow registry, champion alias) --> Streamlit app
   - read incrementally from bronze snapshots after a stored watermark.
 - **gold:**
   - `set_features` (one row per set, features from earlier sets only), `player_ratings` and `head_to_head`;
-  - fully recomputed, one Iceberg commit per table.
+  - fully recomputed, one Iceberg commit per table, and skipped when no silver input has changed since the last build.
 
 **Automation:**
 - Silver and gold run on Dagster declarative automation after each bronze landing. If automation doesn't fire, `uv run python scripts/dagster_ops.py launch refresh_lakehouse` runs both.
@@ -245,12 +245,27 @@ Then open http://localhost:8501 to predict a set.
 
 ## Tools & Technologies
 
-- **Ingestion**: start.gg GraphQL API, Kafka (KRaft), confluent-kafka
-- **Lakehouse**: Apache Iceberg (Lakekeeper REST catalog, Silo S3), Spark 4.0, PyIceberg, Trino
-- **Orchestration**: Dagster (partitions, sensors, declarative automation, asset checks)
-- **Modeling**: scikit-learn, XGBoost, SHAP, Optuna
-- **Experiment Tracking and Registry**: MLflow
-- **App**: Streamlit
+| Area | Tools | Used for |
+|---|---|---|
+| Language and packaging | Python 3.12, [uv](https://docs.astral.sh/uv/) (`uv.lock`) | All code; dependency groups `pipeline`, `ml`, `app`, `dev` |
+| Data source | start.gg GraphQL API, `requests` | Weekly tournament, event and set collection, with rate limiting and adaptive page sizes |
+| Event streaming | Apache Kafka 4.3 (KRaft), confluent-kafka, Kafbat Kafka UI | Raw envelopes, the retry dead-letter topic, and browsing topics |
+| Table format | Apache Iceberg (format v2, copy-on-write) | Bronze, silver and gold tables, with snapshots for incremental reads |
+| Catalog | Lakekeeper 0.14 (Iceberg REST) | Shared table catalog for Spark, Trino and PyIceberg |
+| Object storage | Silo (S3-compatible) | Iceberg data files and MLflow artifacts |
+| Processing | Apache Spark 4.0 (local mode), Iceberg Spark runtime 1.11 | Kafka → bronze (Structured Streaming, `availableNow`), bronze → silver (`MERGE INTO`), table maintenance |
+| Python table access | PyIceberg 0.12, PyArrow, pandas | Gold builds (Elo and feature pass), training reads, app reads |
+| SQL | Trino 483 | Ad hoc queries and smoke-test checks |
+| Metadata database | PostgreSQL 17 | Dagster run and event storage, the Lakekeeper catalog, MLflow tracking |
+| Orchestration | Dagster | Weekly partitions and backfills, sensors, declarative automation, schedules, asset checks, concurrency pools, max-runtime run monitoring |
+| Data quality | Dagster asset checks, Pandera | Checks on every layer; the gold schema is tested with Pandera |
+| Modeling | scikit-learn, XGBoost, SHAP, Optuna | Baseline and logistic regression, the champion model, per-prediction explanations, hyperparameter tuning |
+| Experiment tracking and registry | MLflow 3.16 | Runs, metrics, the model registry and the `champion` alias |
+| App | Streamlit, Plotly | Set predictions with a matchup breakdown, career records and a "why this prediction" chart, plus an Elo leaderboard |
+| Analysis | Jupyter, matplotlib, seaborn, Plotly | The original EDA and modeling notebooks |
+| Infrastructure | Docker Compose, GNU make | The local stack with per-service memory limits, and one-line tasks |
+| Testing | pytest, an end-to-end smoke test | Unit, Dagster, PyIceberg and Spark tests, plus a recorded week run from ingestion to the model registry |
+| Code quality and CI | ruff, pre-commit, GitHub Actions | Linting and formatting (pre-commit runs ruff plus whitespace, YAML and large-file checks); CI runs lint, unit tests and `dagster definitions validate`, then the Spark tests and the smoke test |
 
 ## License
 
