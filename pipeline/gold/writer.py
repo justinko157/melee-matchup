@@ -6,7 +6,7 @@ from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 from pyiceberg.transforms import YearTransform
 
-from pipeline.gold.tables import GOLD_TABLES, SILVER_SNAPSHOT_PROPERTY
+from pipeline.gold.tables import GOLD_TABLES
 
 
 def to_arrow(frame: pd.DataFrame, schema: pa.Schema) -> pa.Table:
@@ -41,16 +41,14 @@ def replace_table(
 
 
 def write_gold(
-    catalog: Catalog, frames: dict[str, pd.DataFrame], silver_sets_snapshot: int | None
+    catalog: Catalog, frames: dict[str, pd.DataFrame], properties: dict[str, str]
 ) -> dict[str, int | None]:
-    """Replace every gold table, consuming ``frames``.
+    """Replace every gold table, consuming ``frames``, and set ``properties`` on each.
 
     Each frame is popped from the dict and released once it is converted to Arrow,
     and set_features (the large one) goes first, so it is gone before the small
     tables are converted. Callers must not hold their own references to the frames.
     """
-    snapshot = "" if silver_sets_snapshot is None else str(silver_sets_snapshot)
-    properties = {SILVER_SNAPSHOT_PROPERTY: snapshot}
     snapshots: dict[str, int | None] = {}
     for identifier, (schema, _) in GOLD_TABLES.items():
         frame = frames.pop(identifier)

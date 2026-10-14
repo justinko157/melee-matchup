@@ -1,5 +1,10 @@
-"""Recompute every gold table from silver. Run directly for a one-off build."""
+"""Recompute every gold table from silver. Run directly for a one-off build.
 
+A build is skipped when every gold table was already written from the current
+snapshots of all silver inputs.
+"""
+
+import argparse
 import json
 import logging
 from dataclasses import dataclass
@@ -9,7 +14,15 @@ from pyiceberg.catalog import Catalog
 
 from pipeline.gold.derive import head_to_head, player_ratings
 from pipeline.gold.features import build_features
-from pipeline.gold.tables import HEAD_TO_HEAD, PLAYER_RATINGS, SET_FEATURES
+from pipeline.gold.tables import (
+    CHECKS_PROPERTY,
+    GOLD_TABLES,
+    HEAD_TO_HEAD,
+    PLAYER_RATINGS,
+    SET_FEATURES,
+    SILVER_INPUTS_PROPERTY,
+    SILVER_SNAPSHOT_PROPERTY,
+)
 from pipeline.gold.writer import write_gold
 from pipeline.lakehouse import current_snapshot_id, load_lakehouse_catalog, read_table
 from pipeline.model_features import CORE_FEATURES
@@ -26,6 +39,10 @@ SET_COLUMNS = (
     "player1_seed",
     "player2_seed",
 )
+# silver.sets first: it is pinned, and the parents read after it are at least as new.
+SILVER_INPUTS = ("silver.sets", "silver.events", "silver.tournaments", "silver.players")
+
+logger = logging.getLogger(__name__)
 
 
 Checks = dict[str, tuple[bool, dict]]
@@ -40,18 +57,49 @@ class GoldBuild:
     eligible_silver_sets: int
     silver_sets_snapshot: int | None
     snapshots: dict[str, int | None]
+    skipped: bool = False
 
 
-def load_silver(catalog: Catalog) -> tuple[pd.DataFrame, pd.DataFrame, int | None, int]:
-    """(sets joined to their tournament, players, silver.sets snapshot, eligible set count).
+def silver_fingerprint(catalog: Catalog) -> dict[str, int | None]:
+    """The current snapshot of every silver table gold reads."""
+    return {identifier: current_snapshot_id(catalog, identifier) for identifier in SILVER_INPUTS}
+
+
+def recorded_build(catalog: Catalog, fingerprint: dict[str, int | None]) -> GoldBuild | None:
+    """The build stored on gold, if every gold table was written from ``fingerprint``."""
+    expected = json.dumps(fingerprint, sort_keys=True)
+    row_counts: dict[str, int] = {}
+    snapshots: dict[str, int | None] = {}
+    stored_checks = set()
+    for identifier in GOLD_TABLES:
+        if not catalog.table_exists(identifier):
+            return None
+        table = catalog.load_table(identifier)
+        properties = table.properties
+        if properties.get(SILVER_INPUTS_PROPERTY) != expected or CHECKS_PROPERTY not in properties:
+            return None
+        stored_checks.add(properties[CHECKS_PROPERTY])
+        snapshot = table.current_snapshot()
+        snapshots[identifier] = None if snapshot is None else snapshot.snapshot_id
+        records = None if snapshot is None else snapshot.summary.get("total-records")
+        row_counts[identifier] = int(records or 0)
+    if len(stored_checks) != 1:
+        return None
+    checks = {name: (passed, meta) for name, (passed, meta) in json.loads(*stored_checks).items()}
+    eligible = checks["features_match_silver"][1]["eligible_silver_sets"]
+    sets_snapshot = fingerprint["silver.sets"]
+    return GoldBuild(row_counts, checks, eligible, sets_snapshot, snapshots, skipped=True)
+
+
+def load_silver(catalog: Catalog, snapshot: int | None) -> tuple[pd.DataFrame, pd.DataFrame, int]:
+    """(sets joined to their tournament, players, eligible set count).
 
     Sets whose event or tournament is missing drop out of the join, as they did in
     the original SQL. The eligible count is taken before the join, so a gap shows
     up in the features_match_silver check.
     """
-    # Pin and read silver.sets before its parents on purpose: the silver job MERGEs
-    # parents first, so parents read afterwards are at least as new as the sets.
-    snapshot = current_snapshot_id(catalog, "silver.sets")
+    # Read silver.sets (pinned to ``snapshot``) before its parents on purpose: the silver
+    # job MERGEs parents first, so parents read afterwards are at least as new as the sets.
     sets = read_table(catalog, "silver.sets", SET_COLUMNS, snapshot_id=snapshot)
     events = read_table(catalog, "silver.events", ("event_id", "tournament_id"))
     tournaments = read_table(
@@ -62,7 +110,7 @@ def load_silver(catalog: Catalog) -> tuple[pd.DataFrame, pd.DataFrame, int | Non
     joined = sets.merge(events, on="event_id", how="inner").merge(
         tournaments, on="tournament_id", how="inner"
     )
-    return joined, players, snapshot, eligible
+    return joined, players, eligible
 
 
 def feature_checks(features: pd.DataFrame, eligible_silver_sets: int) -> Checks:
@@ -78,8 +126,14 @@ def feature_checks(features: pd.DataFrame, eligible_silver_sets: int) -> Checks:
     }
 
 
-def build_gold(catalog: Catalog) -> GoldBuild:
-    sets, players, snapshot, eligible = load_silver(catalog)
+def build_gold(catalog: Catalog, *, force: bool = False) -> GoldBuild:
+    """Rebuild gold from silver, unless it was already built from the same silver snapshots."""
+    fingerprint = silver_fingerprint(catalog)
+    if not force and (recorded := recorded_build(catalog, fingerprint)) is not None:
+        logger.info("Gold is current for silver snapshots %s; skipping the build", fingerprint)
+        return recorded
+    snapshot = fingerprint["silver.sets"]
+    sets, players, eligible = load_silver(catalog, snapshot)
     features, state = build_features(sets)
     del sets
     checks = feature_checks(features, eligible)
@@ -90,7 +144,12 @@ def build_gold(catalog: Catalog) -> GoldBuild:
     }
     del features, state, players
     row_counts = {identifier: len(frame) for identifier, frame in frames.items()}
-    snapshots = write_gold(catalog, frames, snapshot)  # consumes frames
+    properties = {
+        SILVER_SNAPSHOT_PROPERTY: "" if snapshot is None else str(snapshot),
+        SILVER_INPUTS_PROPERTY: json.dumps(fingerprint, sort_keys=True),
+        CHECKS_PROPERTY: json.dumps(checks, sort_keys=True),
+    }
+    snapshots = write_gold(catalog, frames, properties)  # consumes frames
     return GoldBuild(row_counts, checks, eligible, snapshot, snapshots)
 
 
@@ -101,8 +160,11 @@ def gold_checks(build: GoldBuild) -> Checks:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    build = build_gold(load_lakehouse_catalog())
-    summary: dict = dict(build.row_counts)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--force", action="store_true", help="rebuild even if gold is current")
+    args = parser.parse_args()
+    build = build_gold(load_lakehouse_catalog(), force=args.force)
+    summary: dict = {**build.row_counts, "skipped": build.skipped}
     summary["checks"] = {name: passed for name, (passed, _) in gold_checks(build).items()}
     print(json.dumps(summary))
 
