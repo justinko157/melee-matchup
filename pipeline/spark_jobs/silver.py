@@ -3,6 +3,8 @@
 Parsing rules come from the retired src/collector.py:
 - a set needs two slots, both with a player, and state 3;
 - the winner is resolved from winnerId to the matching entrant's player.
+
+Tournaments in EXCLUDED_TOURNAMENT_IDS are kept out of silver entirely.
 """
 
 from pyspark.sql import Column, DataFrame, Window
@@ -33,6 +35,13 @@ KEYS = {
 LINEAGE_COLUMNS = ("source_ingested_at", "source_snapshot_id", "silver_updated_at")
 ORDER_COLUMNS = ("source_ingested_at", "kafka_partition", "kafka_offset")
 DROP_REASONS = ("too_few_slots", "missing_player", "not_completed", "unresolved_winner")
+# Not a data-quality drop: excluded sets are counted apart from DROP_REASONS.
+EXCLUDED = "excluded_tournament"
+# Fabricated brackets. All five claim the same in-person weekend (2020-12-12, mid-COVID),
+# yet their 51k sets were completed 2021-06..2022-08 by 4,307 players who appear in no
+# other tournament: "Great Idea (Not)" parts 3-5, "Melee Replace idea" and "Regional
+# Battles, for Fun and stuff".
+EXCLUDED_TOURNAMENT_IDS = (294173, 315801, 329733, 416947, 439378)
 
 SCHEMAS: dict[str, tuple[tuple[str, str], ...]] = {
     "tournaments": (
@@ -202,9 +211,23 @@ def _source(bronze: DataFrame, payload_schema: StructType) -> list[Column]:
     ]
 
 
+def _is_excluded_tournament(tournament_id: Column) -> Column:
+    return tournament_id.isin(list(EXCLUDED_TOURNAMENT_IDS))
+
+
 def parse_tournaments(bronze: DataFrame) -> DataFrame:
-    """One typed row per bronze tournament row (duplicates kept)."""
-    return bronze.select(*_source(bronze, TOURNAMENT_PAYLOAD)).where(F.col("p.id").isNotNull())
+    """One typed row per bronze tournament row (duplicates kept), minus excluded tournaments."""
+    parsed = bronze.select(*_source(bronze, TOURNAMENT_PAYLOAD))
+    return parsed.where(F.col("p.id").isNotNull() & ~_is_excluded_tournament(F.col("p.id")))
+
+
+def excluded_event_ids(bronze: DataFrame) -> DataFrame:
+    """Distinct event ids (column event_id) of the excluded tournaments in bronze."""
+    parsed = bronze.select(*_source(bronze, TOURNAMENT_PAYLOAD))
+    events = parsed.where(_is_excluded_tournament(F.col("p.id"))).select(
+        F.explode(F.col("p.events")).alias("e")
+    )
+    return events.select(F.col("e.id").alias("event_id")).where("event_id IS NOT NULL").distinct()
 
 
 def tournament_rows(parsed: DataFrame) -> DataFrame:
@@ -242,12 +265,15 @@ def event_rows(parsed: DataFrame) -> DataFrame:
     )
 
 
-def parse_sets(bronze: DataFrame) -> DataFrame:
-    """One row per bronze set row with typed columns and a drop_reason (null = keep)."""
-    df = bronze.select(
-        *_source(bronze, SET_PAYLOAD),
-        F.get_json_object(F.col("query_variables"), "$.eventId").try_cast("long").alias("event_id"),
+def parse_sets(bronze: DataFrame, excluded_events: tuple[int, ...] = ()) -> DataFrame:
+    """One row per bronze set row with typed columns and a drop_reason (null = keep).
+
+    Sets in excluded_events get the EXCLUDED reason ahead of any quality rule.
+    """
+    event_id = (
+        F.get_json_object(F.col("query_variables"), "$.eventId").try_cast("long").alias("event_id")
     )
+    df = bronze.select(*_source(bronze, SET_PAYLOAD), event_id)
     slots = F.col("p.slots")
     slot1, slot2 = _nth(slots, 1), _nth(slots, 2)
     entrant1, entrant2 = slot1["entrant"], slot2["entrant"]
@@ -255,8 +281,10 @@ def parse_sets(bronze: DataFrame) -> DataFrame:
     player2 = _nth(entrant2["participants"], 1)["player"]
     set_id = F.col("p.id").try_cast("long")
     winner = F.col("p.winnerId")
+    excluded = F.col("event_id").isin(list(excluded_events)) if excluded_events else F.lit(False)
     drop_reason = (
-        F.when(F.coalesce(F.size(slots), F.lit(0)) < 2, "too_few_slots")
+        F.when(excluded, EXCLUDED)
+        .when(F.coalesce(F.size(slots), F.lit(0)) < 2, "too_few_slots")
         .when(player1["id"].isNull() | player2["id"].isNull(), "missing_player")
         .when(set_id.isNull() | ~F.coalesce(F.col("p.state") == 3, F.lit(False)), "not_completed")
         .when(
@@ -346,13 +374,14 @@ def game_rows(parsed: DataFrame) -> DataFrame:
     )
 
 
-def drop_counts(parsed: DataFrame) -> tuple[int, dict[str, int]]:
-    """(bronze set rows read, dropped rows per reason), in one pass."""
+def drop_counts(parsed: DataFrame) -> tuple[int, dict[str, int], int]:
+    """(bronze set rows read, dropped rows per reason, excluded rows), in one pass."""
     counts = {
         row.drop_reason: row["count"] for row in parsed.groupBy("drop_reason").count().collect()
     }
     total = sum(counts.values())
-    return total, {reason: int(counts.get(reason, 0)) for reason in DROP_REASONS}
+    dropped = {reason: int(counts.get(reason, 0)) for reason in DROP_REASONS}
+    return total, dropped, int(counts.get(EXCLUDED, 0))
 
 
 def newest_per_key(df: DataFrame, key: str) -> DataFrame:

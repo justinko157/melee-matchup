@@ -14,8 +14,8 @@ GOLD_CHECKS = ("features_match_silver", "no_null_features", "completed_at_non_de
 
 
 def drop_rate(summary: dict) -> float:
-    """Dropped bronze set rows / bronze set rows read in this run (0 when nothing was read)."""
-    read = summary["bronze_rows_read"]
+    """Dropped / bronze set rows read in this run, leaving out excluded sets (0 when none)."""
+    read = summary["bronze_rows_read"] - summary.get("excluded_sets", 0)
     return sum(summary["dropped"].values()) / read if read else 0.0
 
 
@@ -42,6 +42,8 @@ def silver_startgg(spark_job: SparkJobResource) -> dg.MaterializeResult:
             "bronze_rows_read": summary["bronze_rows_read"],
             "drop_rate": rate,
             "dropped": dg.MetadataValue.json(summary["dropped"]),
+            "excluded_sets": summary.get("excluded_sets", 0),
+            "purged": dg.MetadataValue.json(summary.get("purged", {})),
         }
     )
     return dg.MaterializeResult(

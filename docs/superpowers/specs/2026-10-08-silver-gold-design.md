@@ -71,6 +71,13 @@ Sets that fail a rule are dropped, not errored. The job counts them per drop rea
 - `not_completed`
 - `unresolved_winner`
 
+**Excluded tournaments:**
+
+- `EXCLUDED_TOURNAMENT_IDS` in `pipeline/spark_jobs/silver.py` lists fabricated brackets found after the 2018–2024 backfill.
+- Silver skips those tournaments, their events, and the sets of those events.
+- Excluded sets are counted as `excluded_sets`, apart from the drop reasons, and they are left out of the drop rate.
+- Every run deletes any of their rows already in silver, and reports the counts as `purged`. A player is deleted only if every set they played was excluded.
+
 **Partitioning:**
 
 - `sets` and `games` by `months(completed_at)`. `games` carries `completed_at` from its set for this purpose.

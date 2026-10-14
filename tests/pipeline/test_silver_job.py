@@ -7,7 +7,13 @@ pytestmark = pytest.mark.spark
 pytest.importorskip("pyspark")
 
 from pipeline.spark_jobs.bronze import BRONZE_TABLES, bronze_table_ddl  # noqa: E402
-from pipeline.spark_jobs.silver import MERGE_ORDER, WATERMARKS_TABLE, table_name  # noqa: E402
+from pipeline.spark_jobs.silver import (  # noqa: E402
+    EXCLUDED_TOURNAMENT_IDS,
+    MERGE_ORDER,
+    WATERMARKS_TABLE,
+    silver_columns,
+    table_name,
+)
 from pipeline.spark_jobs.silver_job import run_silver  # noqa: E402
 
 BRONZE_SETS, BRONZE_TOURNAMENTS = BRONZE_TABLES["set"], BRONZE_TABLES["tournament"]
@@ -209,3 +215,41 @@ def test_orphan_sets_are_counted(lakehouse):
     summary = run_silver(lakehouse)
     assert summary["orphan_sets"] == 1
     assert summary["winner_not_player"] == 0
+
+
+def test_excluded_tournaments_are_kept_out_and_purged(lakehouse):
+    excluded = EXCLUDED_TOURNAMENT_IDS[0]
+    create_bronze(lakehouse)
+    append(lakehouse, BRONZE_TOURNAMENTS, "tournament", tournament(), {}, T0)
+    append(lakehouse, BRONZE_SETS, "set", a_set(100), {"eventId": 70}, T0)
+    run_silver(lakehouse)
+    # Rows merged before the tournament was excluded: a real player (1) also
+    # played in the excluded event, and player 3 played only there.
+    for entity, values in (
+        ("tournaments", {"tournament_id": excluded}),
+        ("events", {"event_id": 80, "tournament_id": excluded}),
+        ("players", {"player_id": 3}),
+        ("sets", {"set_id": 200, "event_id": 80, "player1_id": 1, "player2_id": 3}),
+        ("games", {"game_id": 900, "set_id": 200}),
+    ):
+        row = ", ".join(str(values.get(column, "NULL")) for column in silver_columns(entity))
+        lakehouse.sql(f"INSERT INTO {table_name(entity)} VALUES ({row})")
+    # The excluded tournament now arrives in bronze, with a new set of its event.
+    append(lakehouse, BRONZE_TOURNAMENTS, "tournament", tournament(excluded, (80,)), {}, T1)
+    append(lakehouse, BRONZE_SETS, "set", a_set(201), {"eventId": 80}, T1)
+
+    summary = run_silver(lakehouse)
+    assert summary["excluded_sets"] == 1
+    assert sum(summary["dropped"].values()) == 0
+    assert summary["purged"] == {
+        "tournaments": 1, "events": 1, "players": 1, "sets": 1, "games": 1,
+    }  # fmt: skip
+    assert [r.set_id for r in lakehouse.table(table_name("sets")).collect()] == [100]
+    players = {r.player_id for r in lakehouse.table(table_name("players")).collect()}
+    assert players == {1, 2}
+    assert (count(lakehouse, "tournaments"), count(lakehouse, "events")) == (1, 1)
+    assert count(lakehouse, "games") == 0
+    assert summary["orphan_sets"] == 0
+
+    again = run_silver(lakehouse)
+    assert set(again["purged"].values()) == {0}

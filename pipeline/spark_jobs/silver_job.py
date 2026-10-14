@@ -9,6 +9,7 @@ from pyspark.sql import functions as F
 from pipeline.spark_jobs.bronze import BRONZE_TABLES
 from pipeline.spark_jobs.silver import (
     DROP_REASONS,
+    EXCLUDED_TOURNAMENT_IDS,
     KEYS,
     MERGE_ORDER,
     SILVER_NAMESPACE,
@@ -16,6 +17,7 @@ from pipeline.spark_jobs.silver import (
     WATERMARKS_TABLE,
     drop_counts,
     event_rows,
+    excluded_event_ids,
     finalize,
     game_rows,
     merge_sql,
@@ -102,6 +104,68 @@ def merge_into(spark: SparkSession, entity: str, staged: DataFrame) -> dict[str,
         staged.unpersist()
 
 
+def find_excluded_events(spark: SparkSession) -> tuple[int, ...]:
+    """Event ids of the excluded tournaments, from all of bronze (it's small)."""
+    table = BRONZE_SOURCES["tournaments"]
+    if not spark.catalog.tableExists(table):
+        return ()
+    rows = excluded_event_ids(spark.table(table)).collect()
+    return tuple(sorted(row.event_id for row in rows))
+
+
+def _delete_matching(spark: SparkSession, entity: str, keys: DataFrame, key: str = "") -> int:
+    """Delete the rows of a silver table whose key (default: its primary key) is in keys.
+
+    Returns how many rows matched.
+    """
+    key = key or KEYS[entity]
+    keys = keys.select(key).distinct()
+    n = spark.table(table_name(entity)).join(keys, key, "left_semi").count()
+    if n:
+        view = f"purge_{entity}"
+        keys.createOrReplaceTempView(view)
+        spark.sql(
+            f"MERGE INTO {table_name(entity)} AS t USING {view} AS s "
+            f"ON t.{key} = s.{key} WHEN MATCHED THEN DELETE"
+        )
+    return n
+
+
+def purge_excluded(spark: SparkSession, excluded_events: tuple[int, ...]) -> dict[str, int]:
+    """Delete silver rows of excluded tournaments merged before they were excluded.
+
+    A player goes only if every set they played was excluded. A no-op once clean.
+    """
+    purged = {entity: 0 for entity in MERGE_ORDER}
+    if excluded_events:
+        sets = spark.table(table_name("sets"))
+        doomed = sets.where(F.col("event_id").isin(list(excluded_events)))
+        doomed = doomed.select("set_id", "player1_id", "player2_id").persist()
+        try:
+            if not doomed.isEmpty():
+                kept = sets.join(doomed.select("set_id"), "set_id", "left_anti")
+                orphaned = _players(doomed).join(_players(kept), "player_id", "left_anti")
+                # Players before sets: the orphan test reads the sets table.
+                purged["players"] = _delete_matching(spark, "players", orphaned)
+                purged["games"] = _delete_matching(spark, "games", doomed, key="set_id")
+                purged["sets"] = _delete_matching(spark, "sets", doomed)
+        finally:
+            doomed.unpersist()
+    tournaments = spark.createDataFrame(
+        [(t,) for t in EXCLUDED_TOURNAMENT_IDS], "tournament_id BIGINT"
+    )
+    events = spark.table(table_name("events")).join(tournaments, "tournament_id", "left_semi")
+    purged["events"] = _delete_matching(spark, "events", events)
+    purged["tournaments"] = _delete_matching(spark, "tournaments", tournaments)
+    return purged
+
+
+def _players(sets: DataFrame) -> DataFrame:
+    return sets.select(F.col("player1_id").alias("player_id")).union(
+        sets.select(F.col("player2_id").alias("player_id"))
+    )
+
+
 def write_watermarks(spark: SparkSession, snapshots: dict[str, int]) -> None:
     new = spark.createDataFrame(
         list(snapshots.items()), "bronze_table STRING, snapshot_id BIGINT"
@@ -143,7 +207,9 @@ def run_silver(spark: SparkSession) -> dict:
         "dropped": {reason: 0 for reason in DROP_REASONS},
         "bronze_rows_read": 0,
         "bronze_tournament_rows_read": 0,
+        "excluded_sets": 0,
     }
+    excluded_events = find_excluded_events(spark)
     staged: dict[str, DataFrame] = {}
     # Parsed bronze is persisted so from_json runs once, not once per Spark action
     # (row counts, drop counts and one MERGE per derived entity).
@@ -165,9 +231,11 @@ def run_silver(spark: SparkSession) -> dict:
 
         plan = plans["sets"]
         if plan.kind != "skip":
-            parsed = parse_sets(read_bronze(spark, BRONZE_SOURCES["sets"], plan))
+            bronze = read_bronze(spark, BRONZE_SOURCES["sets"], plan)
+            parsed = parse_sets(bronze, excluded_events)
             persisted.append(parsed.persist())
-            summary["bronze_rows_read"], summary["dropped"] = drop_counts(parsed)
+            read, dropped, excluded = drop_counts(parsed)
+            summary.update(bronze_rows_read=read, dropped=dropped, excluded_sets=excluded)
             staged["players"] = finalize(
                 newest_per_key(player_rows(parsed), "player_id"), "players", plan.end
             )
@@ -183,6 +251,7 @@ def run_silver(spark: SparkSession) -> dict:
         for df in persisted:
             df.unpersist()
 
+    summary["purged"] = purge_excluded(spark, excluded_events)
     advanced = {BRONZE_SOURCES[s]: p.end for s, p in plans.items() if p.kind != "skip"}
     if advanced:
         write_watermarks(spark, advanced)

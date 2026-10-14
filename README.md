@@ -114,6 +114,7 @@ at about 420 MB when idle.
 - Events that still fail after retries go to the `startgg.ingest.dlq` topic and fail the per-week `no_dlq_messages` check.
 - Malformed messages go to `bronze.startgg_rejects` and fail `no_rejects`.
 - Silver checks: orphan sets, a drop rate of 10% or more, and winners who aren't one of the two players.
+- Silver leaves out a short denylist of fabricated tournaments (`EXCLUDED_TOURNAMENT_IDS`). Their sets are reported as `excluded_sets`, and any rows already in silver are purged.
 - Gold checks: row parity with silver, null features, and time order.
 
 Designs:

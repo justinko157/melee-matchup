@@ -7,8 +7,10 @@ pytestmark = pytest.mark.spark
 pytest.importorskip("pyspark")
 
 from pipeline.spark_jobs.silver import (  # noqa: E402
+    EXCLUDED_TOURNAMENT_IDS,
     drop_counts,
     event_rows,
+    excluded_event_ids,
     game_rows,
     newest_per_key,
     parse_sets,
@@ -146,8 +148,8 @@ def test_unplayable_sets_are_dropped_with_a_reason(spark):
         (set_node(set_id=6), {"eventId": 70}, T0, 6),
     ]
     parsed = parse_sets(bronze(spark, rows))
-    total, dropped = drop_counts(parsed)
-    assert total == 6
+    total, dropped, excluded = drop_counts(parsed)
+    assert (total, excluded) == (6, 0)
     assert dropped == {
         "too_few_slots": 1,
         "missing_player": 1,
@@ -217,3 +219,34 @@ def test_newest_version_wins_then_offset_breaks_ties(spark):
 def test_event_id_comes_from_query_variables(spark):
     parsed = parse_sets(bronze(spark, [(set_node(), {"eventId": 12345}, T0, 1)]))
     assert set_rows(parsed).first().event_id == 12345
+
+
+def test_excluded_tournaments_and_their_events_are_skipped(spark):
+    excluded = EXCLUDED_TOURNAMENT_IDS[0]
+    rows = [(tournament_node(), {}, T0, 1), (tournament_node(tid=excluded), {}, T0, 2)]
+    parsed = parse_tournaments(bronze(spark, rows))
+    assert [r.tournament_id for r in tournament_rows(parsed).collect()] == [7]
+    assert {r.tournament_id for r in event_rows(parsed).collect()} == {7}
+
+
+def test_excluded_event_ids_come_from_excluded_tournaments_only(spark):
+    excluded = tournament_node(tid=EXCLUDED_TOURNAMENT_IDS[0], events=[
+        {"id": 80, "name": "Melee", "slug": "m", "numEntrants": 9, "videogame": {"id": 1}},
+        {"id": 81, "name": "Melee 2", "slug": "m2", "numEntrants": 9, "videogame": {"id": 1}},
+    ])  # fmt: skip
+    rows = [(tournament_node(), {}, T0, 1), (excluded, {}, T0, 2), (excluded, {}, T1, 3)]
+    ids = sorted(r.event_id for r in excluded_event_ids(bronze(spark, rows)).collect())
+    assert ids == [80, 81]
+
+
+def test_sets_of_excluded_events_are_counted_apart_from_drops(spark):
+    rows = [
+        (set_node(set_id=1), {"eventId": 80}, T0, 1),
+        (set_node(set_id=2, state=2), {"eventId": 80}, T0, 2),  # excluded beats not_completed
+        (set_node(set_id=3), {"eventId": 70}, T0, 3),
+    ]
+    parsed = parse_sets(bronze(spark, rows), excluded_events=(80,))
+    total, dropped, excluded = drop_counts(parsed)
+    assert (total, excluded, sum(dropped.values())) == (3, 2, 0)
+    assert [r.set_id for r in set_rows(parsed).collect()] == [3]
+    assert {r.player_id for r in player_rows(parsed).collect()} == {1, 2}

@@ -60,6 +60,11 @@ def test_drop_rate_above_10pct_fails():
     assert drop_rate(silver_summary(dropped=11, read=100)) == pytest.approx(0.11)
 
 
+def test_excluded_sets_are_left_out_of_the_drop_rate():
+    summary = silver_summary(dropped=9, read=150) | {"excluded_sets": 50}
+    assert drop_rate(summary) == pytest.approx(0.09)
+
+
 def test_nothing_read_passes_the_drop_rate_check():
     assert check_results(dropped=0, read=0)["drop_rate_below_10pct"] is True
 
