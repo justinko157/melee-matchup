@@ -7,6 +7,10 @@ SET_FEATURES = f"{GOLD_NAMESPACE}.set_features"
 PLAYER_RATINGS = f"{GOLD_NAMESPACE}.player_ratings"
 HEAD_TO_HEAD = f"{GOLD_NAMESPACE}.head_to_head"
 SILVER_SNAPSHOT_PROPERTY = "melee.silver_sets_snapshot"
+# JSON {silver table: snapshot id} of every silver input, and the check results of
+# the build that wrote the table: an unchanged fingerprint lets a build be skipped.
+SILVER_INPUTS_PROPERTY = "melee.silver_input_snapshots"
+CHECKS_PROPERTY = "melee.gold_checks"
 
 TS = pa.timestamp("us", tz="UTC")
 INT, FLOAT = pa.int64(), pa.float64()

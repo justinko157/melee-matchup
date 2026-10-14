@@ -124,6 +124,14 @@ def test_gold_asset_builds_tables_and_reports_checks(sql_settings, sql_catalog):
     assert all(e.passed for e in result.get_asset_check_evaluations())
     (materialization,) = result.asset_materializations_for_node("gold_startgg")
     assert materialization.metadata["set_features_rows"].value == 1
+    assert materialization.metadata["skipped"].value is False
+
+    again = dg.materialize([gold_startgg], resources={"lakehouse": lakehouse})
+    checks = again.get_asset_check_evaluations()
+    assert len(checks) == 3 and all(e.passed for e in checks)
+    (skipped,) = again.asset_materializations_for_node("gold_startgg")
+    assert skipped.metadata["skipped"].value is True
+    assert skipped.metadata["set_features_rows"].value == 1
 
 
 def automation(asset):

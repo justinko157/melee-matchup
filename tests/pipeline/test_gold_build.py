@@ -82,3 +82,46 @@ def test_set_features_is_partitioned_by_year(sql_catalog):
     build_gold(sql_catalog)
     (field,) = sql_catalog.load_table(SET_FEATURES).spec().fields
     assert isinstance(field.transform, YearTransform)
+
+
+def test_unchanged_silver_skips_the_rebuild(sql_catalog):
+    write_silver(sql_catalog, sets=SETS, events=EVENTS, tournaments=TOURNAMENTS, players=PLAYERS)
+    first = build_gold(sql_catalog)
+    second = build_gold(sql_catalog)
+    assert (first.skipped, second.skipped) == (False, True)
+    assert second.snapshots == first.snapshots  # nothing was written
+    assert second.row_counts == first.row_counts
+    assert second.checks == first.checks
+    assert second.eligible_silver_sets == first.eligible_silver_sets == 3
+
+
+def test_a_change_to_any_silver_input_rebuilds(sql_catalog):
+    write_silver(sql_catalog, sets=SETS, events=EVENTS, tournaments=TOURNAMENTS, players=PLAYERS)
+    first = build_gold(sql_catalog)
+    write_silver(sql_catalog, players=[{"player_id": 300, "gamer_tag": "Carol"}])
+    second = build_gold(sql_catalog)
+    assert not second.skipped
+    assert second.snapshots[PLAYER_RATINGS] != first.snapshots[PLAYER_RATINGS]
+    ratings = rows(sql_catalog, PLAYER_RATINGS).set_index("player_id")
+    assert ratings.loc[300, "gamer_tag"] == "Carol"
+
+
+def test_force_rebuilds_unchanged_silver(sql_catalog):
+    write_silver(sql_catalog, sets=SETS, events=EVENTS, tournaments=TOURNAMENTS, players=PLAYERS)
+    first = build_gold(sql_catalog)
+    forced = build_gold(sql_catalog, force=True)
+    assert not forced.skipped
+    assert forced.snapshots[SET_FEATURES] != first.snapshots[SET_FEATURES]
+
+
+def test_a_skipped_build_reports_the_recorded_failing_checks(sql_catalog):
+    orphan = silver_set(4, 100, 200, 200, 4_000_000, event_id=99)
+    write_silver(
+        sql_catalog, sets=[*SETS, orphan], events=EVENTS, tournaments=TOURNAMENTS, players=PLAYERS
+    )
+    build_gold(sql_catalog)
+    skipped = build_gold(sql_catalog)
+    assert skipped.skipped
+    passed, metadata = gold_checks(skipped)["features_match_silver"]
+    assert not passed
+    assert metadata == {"gold_rows": 3, "eligible_silver_sets": 4}

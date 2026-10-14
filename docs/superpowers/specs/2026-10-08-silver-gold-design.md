@@ -32,7 +32,7 @@ dbt is deliberately not used, because the healthcare repo already covers it.
 | Transform tool | Spark + Iceberg. The sequential Elo feature pass stays in Python and writes gold through PyIceberg. |
 | History | Backfill 2018-01-01 to 2024-12-30 through the existing ingestion backfill as the final step. Design and tests don't depend on it. |
 | How silver stays current | Incremental `MERGE INTO` from bronze, driven by Iceberg incremental append scans and a per-bronze-table watermark. |
-| Gold refresh | Full recompute on every run, replaced in one commit per table. |
+| Gold refresh | Full recompute when any silver input changed, replaced in one commit per table; skipped otherwise. |
 | How the app reads gold | PyIceberg against the Lakekeeper REST catalog. No Trino dependency. |
 | Training | A Dagster asset with an MLflow server in Compose, model registry, and a `champion` alias set by a promotion rule. |
 
@@ -128,7 +128,8 @@ The gold builder is plain Python. It does not use Spark.
 2. Run the `EloEngine` and feature pass. These are moved unchanged from `src/features.py` into `pipeline/gold/features.py`, so the existing `tests/test_elo.py` and `tests/test_features.py` move with them.
 3. Derive `player_ratings` and `head_to_head` from the final state of the same pass.
 4. Write each table with PyIceberg `overwrite()`. That is one atomic commit per table, so readers see the old or the new table, never a mix.
-5. Record the silver snapshot ids used in the gold table properties, as `melee.silver_sets_snapshot`.
+5. Record the silver snapshot ids used in the gold table properties: `melee.silver_sets_snapshot`, plus `melee.silver_input_snapshots` (JSON of the sets, events, tournaments and players snapshots) and `melee.gold_checks` (the check results).
+6. Before step 1, compare the current silver snapshots with `melee.silver_input_snapshots` on every gold table. When they all match, skip the build and report the recorded row counts and check results, with `skipped: true` in the asset metadata. `python -m pipeline.gold.build --force` rebuilds anyway.
 
 ### Training (`pipeline/ml/`)
 

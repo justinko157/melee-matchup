@@ -86,6 +86,7 @@ def gold_startgg(lakehouse: LakehouseResource) -> dg.MaterializeResult:
             "head_to_head_rows": build.row_counts[HEAD_TO_HEAD],
             "silver_sets_snapshot": str(build.silver_sets_snapshot),
             "set_features_snapshot": str(build.snapshots[SET_FEATURES]),
+            "skipped": build.skipped,
         },
         check_results=[
             dg.AssetCheckResult(check_name=name, passed=passed, metadata=metadata)
