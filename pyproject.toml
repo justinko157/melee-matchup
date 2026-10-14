@@ -16,6 +16,7 @@ dev = [
     "pytest>=8.0",
     "pandera>=0.18",
     "pre-commit>=3.6",
+    "pyiceberg[sql-sqlite]==0.12.0",
 ]
 ml = [
     "scikit-learn>=1.4",
@@ -25,10 +26,11 @@ ml = [
     "plotly>=5.18",
     "shap>=0.45",
     "optuna>=3.5",
+    "mlflow==3.16.1",
 ]
 app = [
     "streamlit>=1.30",
-    "mlflow>=2.10",
+    "pyiceberg[pyarrow,pyiceberg-core]==0.12.0",
 ]
 pipeline = [
     "confluent-kafka>=2.16",
@@ -37,10 +39,8 @@ pipeline = [
     "dagster-webserver>=1.13.25",
     "pyspark==4.0.4",
     "trino>=0.340",
+    "pyiceberg[pyarrow,pyiceberg-core]==0.12.0",
 ]
-
-[project.scripts]
-melee-collect = "src.collect:main"
 
 [tool.ruff]
 line-length = 100
@@ -55,6 +55,8 @@ testpaths = ["tests"]
 addopts = "-m 'not spark'"
 filterwarnings = [
     'ignore:datetime.datetime.utcfromtimestamp\(\) is deprecated:DeprecationWarning:dagster.*',
+    'ignore:The set_(bad|over|under) function will be deprecated:PendingDeprecationWarning:shap.*',
+    'ignore:The ``noload`` loader strategy is deprecated:sqlalchemy.exc.SADeprecationWarning:mlflow.*',
 ]
 markers = [
     "spark: needs a local SparkSession (Java). Run with `make test-spark`.",

@@ -9,5 +9,9 @@ services:
     ports: !reset []
   trino:
     ports: !reset []
+  mlflow:
+    ports: !reset []
   dagster-webserver:
+    ports: !reset []
+  app:
     ports: !reset []

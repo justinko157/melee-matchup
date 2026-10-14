@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end smoke test: recorded week -> Kafka -> bronze -> Trino, twice.
+# End-to-end smoke test: recorded week -> Kafka -> bronze -> silver -> gold -> model, twice.
 # Uses a separate Compose project with no host ports and no daemon, so it can
 # run next to the dev stack and nothing else launches runs mid-test.
 set -euo pipefail
@@ -16,7 +16,7 @@ cleanup() { "${COMPOSE[@]}" down -v --remove-orphans >/dev/null || true; }
 trap cleanup EXIT
 cleanup
 
-"${COMPOSE[@]}" up -d --build --wait dagster-code trino
+"${COMPOSE[@]}" up -d --build --wait dagster-code trino mlflow
 
 in_code() {
   "${COMPOSE[@]}" exec -T \
@@ -24,11 +24,19 @@ in_code() {
     dagster-code "$@"
 }
 
+# One fixture week is too small for the default 2025-07-01 split.
+TRAIN_CONFIG='{"ops": {"matchup_model": {"config": {"split_quantile": 0.8, "min_sets": 1}}}}'
+
 for copies in 1 2; do
   echo "--- ingestion pass $copies"
   in_code dagster asset materialize -m pipeline.dagster_defs --select startgg_raw --partition "$WEEK"
   in_code dagster asset materialize -m pipeline.dagster_defs --select bronze_startgg
   in_code python -m tests.smoke.check_bronze --fixture "$FIXTURE" --week "$WEEK" --copies "$copies"
+  in_code dagster asset materialize -m pipeline.dagster_defs --select silver_startgg
+  in_code dagster asset materialize -m pipeline.dagster_defs --select gold_startgg
+  in_code dagster asset materialize -m pipeline.dagster_defs --select matchup_model \
+    --config-json "$TRAIN_CONFIG"
+  in_code python -m tests.smoke.check_lakehouse --fixture "$FIXTURE" --week "$WEEK" --copies "$copies"
 done
 
 echo "smoke test passed"

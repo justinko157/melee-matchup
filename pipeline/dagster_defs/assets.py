@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import dagster as dg
 
 from pipeline.dagster_defs.partitions import WEEKLY_PARTITIONS
+from pipeline.dagster_defs.pools import SPARK_LAKEHOUSE, STARTGG_API
 from pipeline.dagster_defs.resources import KafkaResource, SparkJobResource, StartGGResource
 from pipeline.ingest.collect import collect_week
 
@@ -20,7 +21,7 @@ with warnings.catch_warnings():
 
 @dg.asset(
     partitions_def=WEEKLY_PARTITIONS,
-    pool="startgg_api",
+    pool=STARTGG_API,
     group_name="ingest",
     kinds={"kafka", "python"},
     check_specs=[NO_DLQ_MESSAGES],
@@ -71,7 +72,7 @@ def _run_start(context: dg.AssetExecutionContext) -> datetime | None:
 
 @dg.asset(
     deps=[startgg_raw],
-    pool="spark_bronze",
+    pool=SPARK_LAKEHOUSE,
     group_name="bronze",
     kinds={"spark", "iceberg"},
     retry_policy=dg.RetryPolicy(max_retries=2, delay=30, backoff=dg.Backoff.EXPONENTIAL),

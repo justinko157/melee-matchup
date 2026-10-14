@@ -2,11 +2,25 @@
 
 **Predicting competitive Super Smash Bros Melee tournament set outcomes.**
 
-Can we predict who wins a tournament set between two players? This project builds a full data science pipeline — from API data collection through modeling — to answer that question using 550,000+ sets across 2,200+ tournaments from the competitive Melee scene (2018–2026).
+Can we predict who wins a tournament set between two players? This project builds a full data platform — from API ingestion through a lakehouse to a served model — to answer that question from competitive Melee tournament results on start.gg.
 
-The best model (XGBoost) achieves **78.5% accuracy** and **0.818 AUC**, significantly outperforming a seed-only baseline (70.0%). The model is also well-calibrated: when it says a player has a 70% chance, they actually win ~70% of the time.
+On 742,000+ sets from January 2018 to October 2026, the champion XGBoost model reaches **79.3% accuracy** and **0.831 AUC**, against **72.7%** for a seed-only baseline. The original SQLite-era pipeline, trained on 550,000+ sets from 2018 through March 2026, reached 78.5% accuracy and 0.818 AUC.
 
 ## Results at a Glance
+
+### Current platform (champion model version 3)
+
+Data window: bronze weeks 2018-01-01 through 2026-10-12, with a temporal split at 2025-07-01 (train before, test after). The split gives 465,519 training sets and 89,247 test sets, counting only sets where both players have at least 5 prior sets. XGBoost early-stops on the test split, so its reported metrics are slightly optimistic (the original SQLite-era numbers below share this); early-stopping on a time-based validation slice of the training data instead is a planned follow-up.
+
+| Model | Accuracy | Log Loss | Brier Score | ROC AUC |
+|---|---|---|---|---|
+| Baseline (Seed Only) | 72.7% | 0.548 | 0.182 | 0.756 |
+| Logistic Regression | 78.5% | 0.463 | 0.150 | 0.818 |
+| **XGBoost (champion)** | **79.3%** | **0.447** | **0.144** | **0.831** |
+
+### Original SQLite-era pipeline (2018 – March 2026 data)
+
+Trained before the move to the lakehouse, on 550,000+ sets across 2,200+ tournaments, with the same split date.
 
 | Model | Accuracy | Log Loss | Brier Score | ROC AUC |
 |---|---|---|---|---|
@@ -16,18 +30,22 @@ The best model (XGBoost) achieves **78.5% accuracy** and **0.818 AUC**, signific
 
 ### Key Findings
 
+From the original analysis on the SQLite-era data:
+
 - **Elo rating difference** is the single most predictive feature — a custom rating system built from historical results adds far more signal than tournament seeding alone
 - **Recent form** (rolling 30-set win rate) is the second most important feature, capturing momentum and slumps
 - **Head-to-head records** improve predictions for frequently-matched top players
 - The model's biggest misses are **genuine community-recognized upsets** — not model bugs, but real surprises (e.g., Axe upset at Supernova 2025, Jmook losses at majors)
 
-## Data Platform (in progress)
+## Data Platform
 
-The project is being rebuilt as a data engineering platform. Every record
-enters through Kafka and lands in an Iceberg lakehouse:
+Every record enters through Kafka and flows through a medallion lakehouse on
+Apache Iceberg:
 
 ```
-start.gg API --(Dagster, weekly partitions)--> Kafka --(Spark, availableNow)--> Iceberg bronze --> Trino
+start.gg API --(Dagster, weekly partitions)--> Kafka --(Spark, availableNow)--> bronze
+bronze --(Spark MERGE, incremental snapshots)--> silver --(Python, PyIceberg)--> gold
+gold --> XGBoost (MLflow registry, champion alias) --> Streamlit app
 ```
 
 | Component | Tool | Local URL |
@@ -36,10 +54,30 @@ start.gg API --(Dagster, weekly partitions)--> Kafka --(Spark, availableNow)--> 
 | Event backbone | Kafka (KRaft) + Kafka UI | http://localhost:8085 |
 | Table catalog | Lakekeeper (Iceberg REST) | http://localhost:8181 |
 | Object storage | Silo (S3-compatible) | http://localhost:9001 |
-| Processing | Spark 4.0 (local mode) | n/a |
+| Processing | Spark 4.0 (local mode), PyIceberg | n/a |
 | SQL | Trino | `localhost:8090` |
+| Experiments and registry | MLflow | http://localhost:5000 |
+| App | Streamlit | http://localhost:8501 |
 
-**Run it** (needs Docker with ~6 GB of memory and GNU make):
+**Layers:**
+- **bronze:** raw JSON envelopes, append-only.
+- **silver:**
+  - `tournaments`, `events`, `players`, `sets`, `games`;
+  - deduplicated, typed;
+  - upserted with `MERGE INTO`, where only an equal-or-newer bronze version wins;
+  - read incrementally from bronze snapshots after a stored watermark.
+- **gold:**
+  - `set_features` (one row per set, features from earlier sets only), `player_ratings` and `head_to_head`;
+  - fully recomputed, one Iceberg commit per table.
+
+**Automation:**
+- Silver and gold run on Dagster declarative automation after each bronze landing. If automation doesn't fire, `uv run python scripts/dagster_ops.py launch refresh_lakehouse` runs both.
+- The model trains daily at 07:00 PT when gold has changed. A new version only takes the `champion` alias if it beats the seed-only baseline, and matches or beats the current champion.
+- Weekly maintenance (Sunday 03:00 PT) compacts small files, expires old snapshots and removes orphan files.
+- Bronze, silver, gold, training and maintenance share the `spark_lakehouse` pool (limit 1): every run executes inside the 3 GB `dagster-code` container, so only one memory-heavy run goes at a time.
+- Every job carries a `dagster/max_runtime` tag (`pipeline/dagster_defs/run_limits.py`), and run monitoring fails a run that outlives it, so a run whose worker died cannot hold its pool slot forever.
+
+**Run it** (needs Docker with ~7 GB of memory and GNU make):
 
 ```bash
 cp .env.example .env      # then set STARTGG_API_TOKEN
@@ -47,57 +85,75 @@ make up                   # build and start the stack
 make check-lakehouse      # Spark -> Iceberg -> Trino round trip
 ```
 
-If port 3000 is taken, set `DAGSTER_WEBSERVER_PORT` in `.env` and Dagster will
-be served there instead.
+If a port is taken, set `DAGSTER_WEBSERVER_PORT`, `MLFLOW_PORT` or `APP_PORT`
+in `.env`. `scripts/dagster_ops.py` talks to http://localhost:3000/graphql by
+default, so when you override `DAGSTER_WEBSERVER_PORT` also set
+`DAGSTER_GRAPHQL_URL` (for example `http://localhost:3001/graphql`).
 
-Then open Dagster and backfill `startgg_raw` from the asset page. The
-`land_bronze_after_ingest` sensor lands each finished week into
-`bronze.startgg_tournaments` and `bronze.startgg_sets`. `make bronze-once`
-runs the bronze job by hand; it refuses to start (exits with "another bronze job
-is running") while a Dagster bronze run holds the checkpoint lock.
+Each service has a memory limit in `infra/docker-compose.yml`. MLflow gets
+768 MB and runs with `MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false`, which keeps it
+at about 420 MB when idle.
 
-**Tests:** `make test` (unit and Dagster), `make test-spark` (Spark
-transforms in the pipeline container), `make smoke` (end to end against a
-recorded week; no API token needed).
+**Using it:**
+1. Backfill `startgg_raw` from the Dagster asset page, or run `uv run python scripts/dagster_ops.py backfill --start 2025-01-06 --end 2025-03-31`.
+2. The `land_bronze_after_ingest` sensor lands each finished week into bronze; silver and gold then follow automatically.
+3. Then train with `uv run python scripts/dagster_ops.py launch train_matchup_model`, or wait for the daily schedule.
 
-**Failure handling:** events that still fail after retries go to the
-`startgg.ingest.dlq` topic and fail the `no_dlq_messages` asset check;
-malformed messages go to `bronze.startgg_rejects` and fail `no_rejects`.
+**One-off commands:**
+- `make bronze-once`, `make silver-once` and `make gold-once` run a single layer by hand.
+- The Spark jobs refuse to start while a Dagster run holds their lock.
+- `make train` prints the model comparison.
+- `make tune` runs Optuna.
 
-Design: [`docs/superpowers/specs/2026-10-07-ingestion-foundation-design.md`](docs/superpowers/specs/2026-10-07-ingestion-foundation-design.md)
+**Tests:**
+- `make test`: unit, Dagster, PyIceberg and MLflow tests;
+- `make test-spark`: Spark transforms and the silver MERGE, in the pipeline container;
+- `make smoke`: a recorded week end to end through the model registry, with no API token needed.
+
+**Failure handling:**
+- Events that still fail after retries go to the `startgg.ingest.dlq` topic and fail the per-week `no_dlq_messages` check.
+- Malformed messages go to `bronze.startgg_rejects` and fail `no_rejects`.
+- Silver checks: orphan sets, a drop rate of 10% or more, and winners who aren't one of the two players.
+- Silver leaves out a short denylist of fabricated tournaments (`EXCLUDED_TOURNAMENT_IDS`). Their sets are reported as `excluded_sets`, and any rows already in silver are purged.
+- Gold checks: row parity with silver, null features, and time order.
+
+Designs:
+- [`docs/superpowers/specs/2026-10-07-ingestion-foundation-design.md`](docs/superpowers/specs/2026-10-07-ingestion-foundation-design.md)
+- [`docs/superpowers/specs/2026-10-08-silver-gold-design.md`](docs/superpowers/specs/2026-10-08-silver-gold-design.md)
 
 ## Dataset
 
-| | Count |
-|---|---|
-| Tournaments | 2,209 |
-| Events | 4,026 |
-| Players | 51,763 |
-| Sets | 550,737 |
-| Games | 138,968 |
+All data is collected from the [start.gg](https://start.gg) GraphQL API.
 
-All data collected from the [start.gg](https://start.gg) GraphQL API. The dataset covers offline tournaments with 100+ attendees from January 2018 through March 2026.
+| | Lakehouse silver (2018-01-01 to 2026-10-12 weeks) | Original SQLite DB (Jan 2018 to Mar 2026) |
+|---|---|---|
+| Tournaments | 7,407 | 2,209 |
+| Events | 11,883 | 4,026 |
+| Players | 54,885 | 51,763 |
+| Sets | 742,581 | 550,737 |
+| Games | 200,218 | 138,968 |
+
+The original SQLite database covered offline tournaments with 100+ attendees. The lakehouse ingests tournaments with 50+ attendees. It leaves out five fabricated tournaments (51,214 sets) found in the 2018–2024 backfill.
+
+Silver sets per year (by completion date, UTC): 2018: 135,964 · 2019: 111,971 · 2020: 24,570 · 2021: 23,455 · 2022: 77,961 · 2023: 109,425 · 2024: 107,624 · 2025: 87,288 · 2026 (to Oct 12): 64,323.
 
 ## Project Structure
 
 ```
 melee-matchup/
-├── src/
-│   ├── api_client.py      # start.gg GraphQL client (rate limiting, retries, auto-pagination)
-│   ├── queries.py          # GraphQL query definitions
-│   ├── database.py         # SQLite schema (tournaments, events, players, sets, games)
-│   ├── collector.py        # Data collection pipeline (API → parse → DB)
-│   ├── collect.py          # CLI entry point for data collection
-│   ├── features.py         # Feature engineering (Elo, rolling form, H2H, seeds)
-│   └── model.py            # Modeling pipeline (baseline, LR, XGBoost) + MLflow
-├── notebooks/
-│   ├── 01_eda.ipynb        # Exploratory data analysis
-│   └── 02_modeling.ipynb   # Model comparison, calibration, feature importance
-├── data/
-│   ├── raw/                # SQLite database (generated by collector)
-│   └── processed/          # Feature parquet file (generated by features.py)
-├── pyproject.toml
-└── .env.example
+├── pipeline/
+│   ├── ingest/             # start.gg client, weekly collection, Kafka publisher, fixtures
+│   ├── spark_jobs/         # bronze landing, silver MERGE, Iceberg maintenance
+│   ├── gold/               # Elo + feature pass, gold tables (PyIceberg)
+│   ├── ml/                 # training, tuning, MLflow registry and promotion
+│   ├── serving/            # gold reader and champion loader for the app
+│   └── dagster_defs/       # assets, checks, sensors, schedules, resources
+├── infra/                  # Docker Compose stack, Spark/Trino/Dagster config
+├── scripts/                # smoke test, fixture recorder, Dagster GraphQL helper
+├── tests/                  # unit, Spark, and smoke tests
+├── notebooks/              # original EDA and modeling notebooks (read the retired SQLite DB)
+├── app.py                  # Streamlit app on gold + MLflow
+└── pyproject.toml
 ```
 
 ## How It Works
@@ -107,15 +163,16 @@ melee-matchup/
 A custom pipeline queries the start.gg GraphQL API to collect tournament brackets, set results, player info, seeds, and game-level data (character picks, stages where available).
 
 ```bash
-# Collect all Melee tournaments with 100+ attendees since 2018
-python -m src.collect --start-date 2018-01-01 --min-attendees 100
+uv run python scripts/dagster_ops.py backfill --start 2018-01-01 --end 2024-12-30
 ```
+
+That range is 366 weekly partitions, about 15 hours at the start.gg API rate limit.
 
 The pipeline handles:
 - **Rate limiting** (80 requests/60s with automatic throttling)
 - **Query complexity** (auto-reduces page size when hitting the 1000-object limit)
 - **Pagination** (auto-paginates through results, chunks large date ranges to avoid the 10k entry cap)
-- **Idempotent reruns** (upsert logic + skip-existing means you can safely re-run without duplicates)
+- **Idempotent reruns** (bronze keeps every copy; silver's MERGE keeps the newest version of each record)
 
 ### 2. Feature Engineering
 
@@ -132,8 +189,7 @@ Features are computed **chronologically** — each set's features use only data 
 | `p1_sets_played` / `p2_sets_played` | Experience (total sets in database) |
 
 ```bash
-# Build features and export to parquet
-python -m src.features
+make gold-once   # or let Dagster's automation rebuild gold
 ```
 
 ### 3. Modeling
@@ -147,7 +203,7 @@ Three models compared using a **temporal train/test split** (train on pre-July 2
 All experiments can be tracked with **MLflow**:
 
 ```bash
-python -m src.model  # Runs all three models, prints comparison table
+make train   # prints the comparison table; Dagster registers models in MLflow
 ```
 
 ## Exploratory Analysis Highlights
@@ -165,7 +221,7 @@ The EDA notebook (`notebooks/01_eda.ipynb`) covers:
 
 ### Prerequisites
 
-- Python 3.10+
+- Docker with ~7 GB of memory, GNU make, and [uv](https://docs.astral.sh/uv/)
 - A [start.gg API token](https://start.gg/admin/profile/developer) (free)
 
 ### Installation
@@ -173,34 +229,28 @@ The EDA notebook (`notebooks/01_eda.ipynb`) covers:
 ```bash
 git clone https://github.com/justinko157/melee-matchup.git
 cd melee-matchup
-pip install -e ".[dev,ml]"
-
-# Set up your API token
-cp .env.example .env
-# Edit .env and paste your start.gg token
+uv sync --all-extras
+cp .env.example .env      # then paste your start.gg token
+make up
 ```
 
 ### Quick Start
 
 ```bash
-# 1. Collect data (start small to test)
-python -m src.collect --start-date 2024-01-01 --min-attendees 200
-
-# 2. Build features
-python -m src.features
-
-# 3. Train and evaluate models
-python -m src.model
+uv run python scripts/dagster_ops.py backfill --start 2025-01-06 --end 2025-03-31   # ingest
+uv run python scripts/dagster_ops.py launch train_matchup_model                      # train
 ```
+
+Then open http://localhost:8501 to predict a set.
 
 ## Tools & Technologies
 
-- **Data Collection**: start.gg GraphQL API, `requests`
-- **Storage**: SQLite
-- **Analysis**: pandas, matplotlib, seaborn
-- **Modeling**: scikit-learn, XGBoost
-- **Experiment Tracking**: MLflow
-- **Data Format**: Parquet (via PyArrow)
+- **Ingestion**: start.gg GraphQL API, Kafka (KRaft), confluent-kafka
+- **Lakehouse**: Apache Iceberg (Lakekeeper REST catalog, Silo S3), Spark 4.0, PyIceberg, Trino
+- **Orchestration**: Dagster (partitions, sensors, declarative automation, asset checks)
+- **Modeling**: scikit-learn, XGBoost, SHAP, Optuna
+- **Experiment Tracking and Registry**: MLflow
+- **App**: Streamlit
 
 ## License
 

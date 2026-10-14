@@ -1,6 +1,6 @@
 """GraphQL query definitions for the start.gg API.
 
-Copied from src/queries.py, which is retired in sub-project 2.
+Originally in the retired src/queries.py.
 """
 
 # Search for Melee tournaments in a date range

@@ -40,6 +40,31 @@ services:
       timeout: 5s
       retries: 30
 
+  postgres-databases:
+    # init-databases.sql only runs on an empty volume; this also creates databases
+    # added later (mlflow) on volumes that already exist.
+    image: postgres:17.11
+    environment:
+      <<: *db-env
+      PGPASSWORD: ${POSTGRES_PASSWORD:-melee}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        # On a fresh volume the healthcheck can pass while the init server is still up
+        # (it only listens on a local socket); wait until postgres accepts TCP connections.
+        until pg_isready -h postgres -U "$$POSTGRES_USER" -d postgres; do sleep 1; done
+        for db in lakekeeper dagster mlflow; do
+          if ! psql -h postgres -U "$$POSTGRES_USER" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$$db'" | grep -q 1; then
+            psql -h postgres -U "$$POSTGRES_USER" -d postgres -c "CREATE DATABASE $$db"
+          fi
+        done
+    restart: "no"
+
   silo:
     # Maintained MinIO fork; serves S3 plus the STS endpoint Lakekeeper vends credentials from.
     image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
@@ -69,7 +94,7 @@ services:
     entrypoint: /bin/sh
     command:
       - -c
-      - mc alias set local http://silo:9000 "$$SILO_ROOT_USER" "$$SILO_ROOT_PASSWORD" && mc mb --ignore-existing local/lakehouse
+      - mc alias set local http://silo:9000 "$$SILO_ROOT_USER" "$$SILO_ROOT_PASSWORD" && mc mb --ignore-existing local/lakehouse && mc mb --ignore-existing local/mlflow
     restart: "no"
 
   lakekeeper-migrate:
@@ -223,6 +248,47 @@ services:
       timeout: 10s
       retries: 30
 
+  mlflow:
+    # The -full image includes mlflow[db,extras]: psycopg2-binary and boto3.
+    image: ghcr.io/mlflow/mlflow:v3.16.1-full
+    command:
+      - mlflow
+      - server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --workers
+      - "1"
+      - --backend-store-uri
+      - postgresql+psycopg2://${POSTGRES_USER:-melee}:${POSTGRES_PASSWORD:-melee}@postgres:5432/mlflow
+      - --artifacts-destination
+      - s3://mlflow
+      - --serve-artifacts
+      # MLflow 3.5+ rejects unknown Host headers; containers call it as mlflow:5000.
+      - --allowed-hosts
+      - mlflow,mlflow:5000,localhost,localhost:*,127.0.0.1,127.0.0.1:*
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://silo:9000
+      AWS_ACCESS_KEY_ID: ${SILO_ROOT_USER:-melee-admin}
+      AWS_SECRET_ACCESS_KEY: ${SILO_ROOT_PASSWORD:-melee-admin-password}
+      AWS_DEFAULT_REGION: us-east-1
+      # The GenAI job runner starts seven ~230 MB huey consumers; this project uses none.
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
+    mem_limit: 768m  # ~420 MiB idle with job execution off
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+    depends_on:
+      postgres-databases:
+        condition: service_completed_successfully
+      create-bucket:
+        condition: service_completed_successfully
+
   dagster-code:
     <<: *dagster
     hostname: dagster-code
@@ -234,6 +300,7 @@ services:
       <<: *db-env
       DAGSTER_HOME: /opt/dagster/home
       STARTGG_FIXTURE_PATH: ${STARTGG_FIXTURE_PATH:-}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
     volumes:
       - ./dagster/dagster.yaml:/opt/dagster/home/dagster.yaml:ro
       - checkpoints:/checkpoints
@@ -245,6 +312,8 @@ services:
         condition: service_completed_successfully
       lakekeeper-warehouse:
         condition: service_completed_successfully
+      mlflow:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "dagster", "api", "grpc-health-check", "-p", "4000"]
       interval: 5s
@@ -252,12 +321,12 @@ services:
       retries: 30
 
   dagster-pools:
-    # default_limit only applies once Dagster first sees a pool; set both up front.
+    # default_limit only applies once Dagster first sees a pool; set every pool up front.
     <<: *dagster
     command:
       - bash
       - -c
-      - dagster instance concurrency set startgg_api 1 && dagster instance concurrency set spark_bronze 1
+      - dagster instance concurrency set startgg_api 1 && dagster instance concurrency set spark_lakehouse 1
     depends_on:
       postgres:
         condition: service_healthy
@@ -285,10 +354,33 @@ services:
       dagster-pools:
         condition: service_completed_successfully
 
+  app:
+    image: melee-app:dev
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      LAKEKEEPER_URL: http://lakekeeper:8181/catalog
+      LAKEHOUSE_WAREHOUSE: melee
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      # Fail fast when MLflow is down instead of retrying for minutes on every rerun.
+      MLFLOW_HTTP_REQUEST_MAX_RETRIES: "0"
+      MLFLOW_HTTP_REQUEST_TIMEOUT: "5"
+    ports:
+      - "${APP_PORT:-8501}:8501"
+    mem_limit: 768m
+    depends_on:
+      lakekeeper-warehouse:
+        condition: service_completed_successfully
+      mlflow:
+        condition: service_healthy
+
   pipeline-tools:
     # One-off commands: Spark tests, lakehouse checks, ad-hoc bronze runs.
     <<: *pipeline-image
     profiles: ["tools"]
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
     volumes:
       - ..:/app
       - checkpoints:/checkpoints

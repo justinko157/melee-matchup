@@ -1,12 +1,22 @@
-"""Jobs, the bronze sensor and the daily refresh schedule."""
+"""Jobs, the bronze sensor, the daily refresh schedule and lakehouse automation."""
 
 import dagster as dg
 
 from pipeline.dagster_defs.assets import bronze_startgg, startgg_raw
+from pipeline.dagster_defs.lakehouse_assets import gold_startgg, silver_startgg
 from pipeline.dagster_defs.partitions import WEEKLY_PARTITIONS
+from pipeline.dagster_defs.run_limits import BRONZE, INGEST, LAKEHOUSE, max_runtime
 
-ingest_job = dg.define_asset_job("ingest_startgg", selection=[startgg_raw])
-bronze_job = dg.define_asset_job("land_bronze", selection=[bronze_startgg])
+ingest_job = dg.define_asset_job(
+    "ingest_startgg", selection=[startgg_raw], tags=max_runtime(INGEST)
+)
+bronze_job = dg.define_asset_job(
+    "land_bronze", selection=[bronze_startgg], tags=max_runtime(BRONZE)
+)
+# Silver then gold by hand, for when declarative automation doesn't fire.
+refresh_lakehouse_job = dg.define_asset_job(
+    "refresh_lakehouse", selection=[silver_startgg, gold_startgg], tags=max_runtime(LAKEHOUSE)
+)
 
 PENDING = [dg.DagsterRunStatus.QUEUED, dg.DagsterRunStatus.NOT_STARTED]
 
@@ -53,3 +63,12 @@ def refresh_recent_weeks(context: dg.ScheduleEvaluationContext) -> list[dg.RunRe
     keys = WEEKLY_PARTITIONS.get_partition_keys(current_time=context.scheduled_execution_time)[-2:]
     day = context.scheduled_execution_time.strftime("%Y-%m-%d")
     return [dg.RunRequest(run_key=f"{key}@{day}", partition_key=key) for key in keys]
+
+
+# Declarative automation sensors start STOPPED unless told otherwise.
+lakehouse_automation = dg.AutomationConditionSensorDefinition(
+    "lakehouse_automation",
+    target=dg.AssetSelection.assets(silver_startgg, gold_startgg),
+    run_tags=max_runtime(LAKEHOUSE),
+    default_status=dg.DefaultSensorStatus.RUNNING,
+)

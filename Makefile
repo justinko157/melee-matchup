@@ -1,5 +1,5 @@
 SHELL := bash
-.PHONY: install collect features validate train tune export app test lint format docker-build docker-run clean up down nuke ps logs check-lakehouse test-spark bronze-once smoke
+.PHONY: install train tune app test lint format docker-build clean up down nuke ps logs check-lakehouse test-spark bronze-once silver-once gold-once smoke
 
 # ── Setup ──────────────────────────────────────────────
 install:
@@ -44,48 +44,40 @@ bronze-once:
 	$(COMPOSE) run --rm pipeline-tools spark-submit pipeline/spark_jobs/bronze_job.py \
 		--bootstrap-servers kafka:9092 --checkpoint-root /checkpoints/bronze
 
-# ── Data Pipeline ──────────────────────────────────────
-collect:
-	uv run python -m src.collect --start-date 2018-01-01 --min-attendees 50
+silver-once:
+	$(COMPOSE) run --rm pipeline-tools spark-submit pipeline/spark_jobs/silver_job.py \
+		--lock-dir /checkpoints/silver
 
-features:
-	uv run python -m src.features
-
-validate:
-	uv run python -m src.validation
+gold-once:
+	$(COMPOSE) run --rm pipeline-tools python -m pipeline.gold.build
 
 # ── Modeling ───────────────────────────────────────────
+# Training reads gold through the lakehouse catalog, so it runs inside the stack.
 train:
-	uv run python -m src.model
+	$(COMPOSE) exec -T dagster-code python -m pipeline.ml.train
 
 tune:
-	uv run python -m src.tuning --n-trials 50
-
-export:
-	uv run python -m src.export_app_data
+	$(COMPOSE) exec -T dagster-code python -m pipeline.ml.tuning --n-trials 50
 
 # ── App ────────────────────────────────────────────────
 app:
-	uv run streamlit run app.py
+	$(COMPOSE) up -d --build --wait app
 
 # ── Quality ────────────────────────────────────────────
 test:
 	uv run pytest -v
 
 lint:
-	uv run ruff check src/ tests/ app.py pipeline/ scripts/
+	uv run ruff check tests/ app.py pipeline/ scripts/
 
 format:
-	uv run ruff format pipeline tests/pipeline tests/smoke scripts
+	uv run ruff format pipeline tests/pipeline tests/smoke scripts app.py
 
 # ── Docker ─────────────────────────────────────────────
 docker-build:
-	docker build -t melee-matchup .
-
-docker-run:
-	docker run -p 8501:8501 melee-matchup
+	docker build -t melee-app:dev .
 
 # ── Cleanup ────────────────────────────────────────────
 clean:
-	rm -rf mlruns/ .pytest_cache/ __pycache__/ src/__pycache__/
+	rm -rf mlruns/ .pytest_cache/ __pycache__/
 	find . -name "*.pyc" -delete

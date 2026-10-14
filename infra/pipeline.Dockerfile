@@ -20,7 +20,7 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
 
 WORKDIR /app
 COPY pyproject.toml uv.lock .python-version ./
-RUN uv sync --frozen --no-install-project --extra pipeline --extra dev
+RUN uv sync --frozen --no-install-project --extra pipeline --extra ml --extra dev
 
 COPY infra/spark/spark-defaults.conf /opt/spark-conf/spark-defaults.conf
 COPY infra/spark/warm_ivy_cache.py /tmp/warm_ivy_cache.py
