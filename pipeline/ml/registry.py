@@ -92,6 +92,7 @@ def train_and_register(
                 "split_quantile": "" if split_quantile is None else split_quantile,
                 "train_size": len(train),
                 "test_size": len(test),
+                "xgboost_n_estimators": xgb.model.n_estimators,
                 "features": ",".join(CORE_FEATURES),
             }
         )

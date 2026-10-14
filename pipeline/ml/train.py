@@ -30,6 +30,19 @@ logger = logging.getLogger(__name__)
 # Train on everything before this time, test on the rest (the last ~9 months).
 DEFAULT_SPLIT_AT = pd.Timestamp("2025-07-01", tz="UTC")
 DEFAULT_MIN_SETS = 5
+# The latest slice of the training window, by time, that picks XGBoost's tree count.
+VALIDATION_FRACTION = 0.1
+XGB_MAX_TREES = 300
+XGB_EARLY_STOPPING_ROUNDS = 20
+XGB_PARAMS = {
+    "max_depth": 5,
+    "learning_rate": 0.05,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "min_child_weight": 10,
+    "eval_metric": "logloss",
+    "random_state": 42,
+}
 
 
 @dataclass
@@ -99,6 +112,19 @@ def split_data(
         )
     logger.info(f"Train: {len(train):,} sets, Test: {len(test):,} sets")
     return train, test
+
+
+def validation_split(
+    train: pd.DataFrame, fraction: float = VALIDATION_FRACTION
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Hold out the latest fraction of the training window (by time) for early stopping."""
+    fit, valid = quantile_split(train, 1 - fraction)
+    if fit.empty or valid.empty:
+        raise ValueError(
+            f"Empty validation split: {len(fit)} fit / {len(valid)} validation rows from "
+            f"{len(train)} training rows."
+        )
+    return fit, valid
 
 
 def evaluate(
@@ -175,25 +201,21 @@ def train_logistic(train: pd.DataFrame, test: pd.DataFrame) -> ModelResult:
 
 
 def train_xgboost(train: pd.DataFrame, test: pd.DataFrame) -> ModelResult:
-    """XGBoost gradient boosting on all core features."""
+    """XGBoost gradient boosting on all core features.
+
+    The tree count is early-stopped on the latest slice of train, then the model is
+    refit on all of train with that count. The test split is only scored.
+    """
     features = CORE_FEATURES
-    model = XGBClassifier(
-        n_estimators=300,
-        max_depth=5,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        min_child_weight=10,
-        eval_metric="logloss",
-        early_stopping_rounds=20,
-        random_state=42,
+    fit, valid = validation_split(train)
+    probe = XGBClassifier(
+        n_estimators=XGB_MAX_TREES, early_stopping_rounds=XGB_EARLY_STOPPING_ROUNDS, **XGB_PARAMS
     )
-    model.fit(
-        train[features],
-        train[TARGET],
-        eval_set=[(test[features], test[TARGET])],
-        verbose=False,
+    probe.fit(
+        fit[features], fit[TARGET], eval_set=[(valid[features], valid[TARGET])], verbose=False
     )
+    model = XGBClassifier(n_estimators=probe.best_iteration + 1, **XGB_PARAMS)
+    model.fit(train[features], train[TARGET], verbose=False)
     return evaluate("XGBoost", model, test[features], test[TARGET], features)
 
 
