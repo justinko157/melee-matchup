@@ -15,6 +15,7 @@ from pipeline.ml.train import (  # noqa: E402
     train_baseline,
     train_logistic,
     train_xgboost,
+    validation_split,
 )
 from pipeline.ml.tuning import objective  # noqa: E402
 from pipeline.model_features import CORE_FEATURES, TARGET  # noqa: E402
@@ -93,3 +94,18 @@ def test_load_features_reads_only_the_training_columns(monkeypatch):
     assert len(requested["columns"]) == len(set(requested["columns"]))
     assert df["completed_at"].is_monotonic_increasing
     assert list(df.index) == list(range(20))
+
+
+def test_validation_split_holds_out_the_latest_slice_of_train():
+    fit, valid = validation_split(synthetic_gold_features(200), fraction=0.1)
+    assert (len(fit), len(valid)) == (180, 20)
+    assert fit["completed_at"].max() < valid["completed_at"].min()
+
+
+def test_xgboost_never_looks_at_the_test_split():
+    train, test = split_data(synthetic_gold_features(), split_quantile=0.7)
+    flipped = test.assign(**{TARGET: 1 - test[TARGET]})
+    original = train_xgboost(train, test)
+    with_flipped = train_xgboost(train, flipped)
+    assert original.model.n_estimators == with_flipped.model.n_estimators
+    assert (original.y_prob == with_flipped.y_prob).all()

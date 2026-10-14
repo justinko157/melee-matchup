@@ -10,7 +10,7 @@ On 742,000+ sets from January 2018 to October 2026, the champion XGBoost model r
 
 ### Current platform (champion model version 3)
 
-Data window: bronze weeks 2018-01-01 through 2026-10-12, with a temporal split at 2025-07-01 (train before, test after). The split gives 465,519 training sets and 89,247 test sets, counting only sets where both players have at least 5 prior sets. XGBoost early-stops on the test split, so its reported metrics are slightly optimistic (the original SQLite-era numbers below share this); early-stopping on a time-based validation slice of the training data instead is a planned follow-up.
+Data window: bronze weeks 2018-01-01 through 2026-10-12, with a temporal split at 2025-07-01 (train before, test after). The split gives 465,519 training sets and 89,247 test sets, counting only sets where both players have at least 5 prior sets. XGBoost picks its tree count by early stopping on the latest 10% of the training window, then refits on the whole window, so the test split is never used for fitting or tuning. (The original SQLite-era numbers below early-stopped on the test split; on the current data, that changes no metric by more than 0.0001.)
 
 | Model | Accuracy | Log Loss | Brier Score | ROC AUC |
 |---|---|---|---|---|
@@ -198,7 +198,7 @@ Three models compared using a **temporal train/test split** (train on pre-July 2
 
 - **Baseline**: Logistic regression on seed differential only
 - **Logistic Regression**: All features with standard scaling
-- **XGBoost**: 300 trees, depth 5, early stopping — best performer
+- **XGBoost**: up to 300 trees, depth 5, early-stopped on the latest 10% of the training window, then refit on all of it — best performer
 
 All experiments can be tracked with **MLflow**:
 
