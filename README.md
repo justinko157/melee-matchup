@@ -4,19 +4,19 @@
 
 Can we predict who wins a tournament set between two players? This project builds a full data platform — from API ingestion through a lakehouse to a served model — to answer that question from competitive Melee tournament results on start.gg.
 
-On the data loaded into the platform so far (2025 onward), the champion XGBoost model reaches **78.4% accuracy** and **0.817 AUC**, against **74.4%** for a seed-only baseline. The original SQLite-era pipeline, trained on 550,000+ sets from 2018 through March 2026, reached 78.5% accuracy and 0.818 AUC.
+On 742,000+ sets from January 2018 to October 2026, the champion XGBoost model reaches **79.3% accuracy** and **0.831 AUC**, against **72.7%** for a seed-only baseline. The original SQLite-era pipeline, trained on 550,000+ sets from 2018 through March 2026, reached 78.5% accuracy and 0.818 AUC.
 
 ## Results at a Glance
 
-### Current platform (champion model version 1)
+### Current platform (champion model version 3)
 
-Data window: bronze weeks 2025-01-06 through 2026-10-05, with a temporal split at 2025-07-01 (train before, test after). These numbers will change once the 2018–2024 backfill is loaded. XGBoost early-stops on the test split, so its reported metrics are slightly optimistic (the original SQLite-era numbers below share this); early-stopping on a time-based validation slice of the training data instead is a planned follow-up.
+Data window: bronze weeks 2018-01-01 through 2026-10-12, with a temporal split at 2025-07-01 (train before, test after). The split gives 465,519 training sets and 89,247 test sets, counting only sets where both players have at least 5 prior sets. XGBoost early-stops on the test split, so its reported metrics are slightly optimistic (the original SQLite-era numbers below share this); early-stopping on a time-based validation slice of the training data instead is a planned follow-up.
 
 | Model | Accuracy | Log Loss | Brier Score | ROC AUC |
 |---|---|---|---|---|
-| Baseline (Seed Only) | 74.4% | 0.540 | 0.177 | 0.755 |
-| Logistic Regression | 77.5% | 0.478 | 0.155 | 0.806 |
-| **XGBoost (champion)** | **78.4%** | **0.464** | **0.150** | **0.817** |
+| Baseline (Seed Only) | 72.7% | 0.548 | 0.182 | 0.756 |
+| Logistic Regression | 78.5% | 0.463 | 0.150 | 0.818 |
+| **XGBoost (champion)** | **79.3%** | **0.447** | **0.144** | **0.831** |
 
 ### Original SQLite-era pipeline (2018 – March 2026 data)
 
@@ -125,15 +125,17 @@ Designs:
 
 All data is collected from the [start.gg](https://start.gg) GraphQL API.
 
-| | Lakehouse silver (2025-01-06 to 2026-10-05 weeks) | Original SQLite DB (Jan 2018 to Mar 2026) |
+| | Lakehouse silver (2018-01-01 to 2026-10-12 weeks) | Original SQLite DB (Jan 2018 to Mar 2026) |
 |---|---|---|
-| Tournaments | 1,462 | 2,209 |
-| Events | 2,450 | 4,026 |
-| Players | 14,744 | 51,763 |
-| Sets | 150,274 | 550,737 |
-| Games | 129,404 | 138,968 |
+| Tournaments | 7,407 | 2,209 |
+| Events | 11,883 | 4,026 |
+| Players | 54,885 | 51,763 |
+| Sets | 742,581 | 550,737 |
+| Games | 200,218 | 138,968 |
 
-The original SQLite database covered offline tournaments with 100+ attendees. The lakehouse counts will grow once the 2018–2024 backfill is loaded.
+The original SQLite database covered offline tournaments with 100+ attendees. The lakehouse ingests tournaments with 50+ attendees. It leaves out five fabricated tournaments (51,214 sets) found in the 2018–2024 backfill.
+
+Silver sets per year (by completion date, UTC): 2018: 135,964 · 2019: 111,971 · 2020: 24,570 · 2021: 23,455 · 2022: 77,961 · 2023: 109,425 · 2024: 107,624 · 2025: 87,288 · 2026 (to Oct 12): 64,323.
 
 ## Project Structure
 
