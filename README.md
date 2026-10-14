@@ -198,7 +198,7 @@ Three models compared using a **temporal train/test split** (train on pre-July 2
 
 - **Baseline**: Logistic regression on seed differential only
 - **Logistic Regression**: All features with standard scaling
-- **XGBoost**: up to 300 trees, depth 5, early-stopped on the latest 10% of the training window, then refit on all of it — best performer
+- **XGBoost**: depth 5, with the tree count (up to 1,000; 334 on the current data) early-stopped on the latest 10% of the training window, then refit on all of it — best performer
 
 All experiments can be tracked with **MLflow**:
 
