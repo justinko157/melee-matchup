@@ -32,7 +32,7 @@ DEFAULT_SPLIT_AT = pd.Timestamp("2025-07-01", tz="UTC")
 DEFAULT_MIN_SETS = 5
 # The latest slice of the training window, by time, that picks XGBoost's tree count.
 VALIDATION_FRACTION = 0.1
-XGB_MAX_TREES = 300
+XGB_MAX_TREES = 1000  # a ceiling: early stopping picks the count (334 on 2018-2026 gold)
 XGB_EARLY_STOPPING_ROUNDS = 20
 XGB_PARAMS = {
     "max_depth": 5,
